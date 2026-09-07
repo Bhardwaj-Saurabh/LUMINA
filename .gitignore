@@ -1,0 +1,18 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+
+# Builds
+web/dist/
+dist/
+
+# Run artifacts (assignment hygiene: never committed)
+runs/
+reports/
+
+# OS / editor
+.DS_Store
