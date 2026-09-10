@@ -19,35 +19,27 @@
 
 ### 1.1 Context diagram
 
-```
-                    ┌────────────────────────────────────────────┐
-                    │  Browser — React 18 + Vite SPA (provided)  │
-                    │  /  /evals  · SSE consumer · VITE_API_URL  │
-                    │  = "" (same-origin: gateway serves dist)   │
-                    └──────────────────────┬─────────────────────┘
-                                           │ HTTPS  (x-user-id, x-request-id)
-                                           ▼
-        ┌──────────────────────────────────────────────────────────────────┐
-        │  lumina-gateway · Cloud Run (PUBLIC) · Express :8787             │
-        │  serve web/dist · CORS · x-user-id → 401 · zod validate → 400    │
-        │  token-bucket rate limit → 429 · request-id · pino JSON          │
-        │  JSON proxy + SSE byte-level pass-through + multipart stream     │
-        └──────────────────────┬───────────────────────────────────────────┘
-                               │ HTTPS + IAM ID token (audience = agent URL)
-                               │ same contract, x-user-id / x-request-id forwarded
-                               ▼
-        ┌──────────────────────────────────────────────────────────────────┐
-        │  lumina-agent · Cloud Run (NOT public, IAM-gated) · Express :8000│
-        │  agent loop (quick/deep) · tool registry · planner → fan-out →   │
-        │  merge · memory · hybrid RAG · jobs worker (child process) ·     │
-        │  spend gates · run logs — ALL provider keys live here            │
-        └───┬──────────────┬──────────────┬──────────────┬─────────────────┘
-            ▼              ▼              ▼              ▼
-      Anthropic API   Tavily/SerpApi  OpenAI          MongoDB Atlas M0 (europe-west2)
-      claude-sonnet-5 (env-swappable) text-embedding- threads · messages · memories(vec)
-      (Secret Mgr)    (Secret Mgr)    3-small, 1536d  spaces · documents · chunks(vec+BM25)
-                                      (Secret Mgr)    searchCache(TTL) · jobs · requests ·
-                                                      runs · GridFS uploads
+```mermaid
+flowchart TB
+    B["Browser — React 18 + Vite SPA (provided)<br/>/ and /evals · SSE consumer<br/>VITE_API_URL = '' (same-origin: gateway serves dist)"]
+
+    GW["lumina-gateway · Cloud Run PUBLIC · Express :8787<br/>serve web/dist · CORS · x-user-id → 401 · zod validate → 400<br/>token-bucket rate limit → 429 · request-id · pino JSON<br/>JSON proxy · SSE byte-level pass-through · multipart stream"]
+
+    AG["lumina-agent · Cloud Run NOT public, IAM-gated · Express :8000<br/>agent loop (quick/deep) · tool registry · planner → fan-out → merge<br/>memory · hybrid RAG · jobs worker (child process)<br/>spend gates · run logs — ALL provider keys live here"]
+
+    LLM["Anthropic API<br/>claude-sonnet-5"]
+    SRCH["Tavily / SerpApi<br/>env-swappable"]
+    EMB["OpenAI embeddings<br/>text-embedding-3-small · 1536d"]
+    DB[("MongoDB Atlas M0 · europe-west2<br/>threads · messages · memories(vec) · spaces · documents<br/>chunks(vec + BM25) · searchCache(TTL) · jobs<br/>requests · runs · GridFS uploads")]
+    SM["Secret Manager"]
+
+    B -- "HTTPS · x-user-id · x-request-id" --> GW
+    GW -- "HTTPS + IAM ID token (audience = agent URL)<br/>same contract · headers forwarded" --> AG
+    AG --> LLM
+    AG --> SRCH
+    AG --> EMB
+    AG --> DB
+    SM -. "keys mounted at deploy (agent only)" .-> AG
 ```
 
 ### 1.2 Trust boundaries
@@ -234,32 +226,22 @@ sweeper's stale-claim recovery a first-class, tested transition.
 The contract requires `sources` before the first `token`, which forces a two-phase shape:
 **research (non-streaming tool-use turns) → sources → synthesis (streaming)**.
 
-```
-per request: Budget{maxToolCalls, deadline, maxUsd} · SourceCollector · AskEmitter
-
-RESEARCH (loop while stop_reason == "tool_use"):
-  1. budget checkpoint (before the LLM call AND before each tool execution)
-       exceeded → break with terminated:'cap'
-  2. messages.create(system, history, evidence-so-far, tools = registry.forDepth(depth))
-  3. execute ALL tool_use blocks concurrently; return all tool_results in ONE user message
-       (splitting them degrades the model's parallel tool calling)
-       - failed tool → tool_result{is_error:true} + emitter.trace({ok:false, error}) — never dropped (A1)
-       - successful retrievals register material with the SourceCollector
-  4. emitter.trace({step, tool, input, ok, ms, reason}) per call
-       (`reason` is a required field on every tool's input schema — the model explains each step)
-
-SOURCES:  collector.finalize() → emitter.sources([...])   ← always before the first token
-
-SYNTHESIS (streaming):
-  messages.stream(evidence + numbered source list + citation rules)
-  each text delta → emitter.token({text}); TTFT clock stops at the first delta
-
-VERIFY → DONE:
-  unresolvedCitations(fullText, sources) must be empty
-    → violations: terminated:'error' + SSE error frame (never a quiet done)
-  emitter.done({answerId, latencyMs, ttftMs, model, tokens{in,out}, costUsd,
-                searchCached, terminated, depth, subQuestions?})
-  persist message pair · write run log (file + runs collection) · insert requests row
+```mermaid
+flowchart TB
+    START(["ask request<br/>Budget · SourceCollector · AskEmitter"]) --> CHK{"budget checkpoint<br/>calls · deadline · USD"}
+    CHK -- "exceeded" --> CAP["break with terminated:'cap'<br/>(honest partial from evidence so far)"]
+    CHK -- "ok" --> TURN["LLM turn — messages.create<br/>system + history + evidence-so-far<br/>tools = registry.forDepth(depth)"]
+    TURN --> SR{"stop_reason?"}
+    SR -- "tool_use" --> EXEC["execute ALL tool_use blocks concurrently<br/>→ all tool_results in ONE user message<br/>failed tool → is_error:true + trace ok:false — never dropped (A1)"]
+    EXEC --> TRACE["emitter.trace per call — step · tool · input · ok · ms · reason<br/>(reason is a required tool-input field: the model explains each step)<br/>successful retrievals register with the SourceCollector"]
+    TRACE --> CHK
+    SR -- "end_turn" --> SRCS
+    CAP --> SRCS["collector.finalize() → emit sources<br/>(ALWAYS before the first token)"]
+    SRCS --> SYN["streaming synthesis — messages.stream<br/>evidence + numbered source list + citation rules<br/>each text delta → token event · TTFT stops at the first delta"]
+    SYN --> VER{"unresolvedCitations<br/>(fullText, sources) empty?"}
+    VER -- "no" --> ERR["terminated:'error' + SSE error frame<br/>(never a quiet done)"]
+    VER -- "yes" --> DONE["emit done — answerId · latencyMs · ttftMs · model<br/>tokens in/out · costUsd · searchCached · terminated · depth"]
+    DONE --> PERSIST["persist message pair · run log (file + runs collection) · requests row"]
 ```
 
 **Budget accounting** (`budget.ts`) — one object per request, all four dimensions checked at
@@ -291,41 +273,31 @@ harness run it without HTTP.
 
 ### 3.2 Deep search: planner → researchers → merger
 
-```
-ask {depth:"deep"}
-  │
-  ├─ guards: killSwitch → deepCap ($inc {userId, dayKey}; over cap → 429 {error, resetsAt}
-  │          BEFORE the stream ever starts)
-  │
-  ├─ PLANNER  (core/deep/planner.ts)                        ≤ 4 s budget, effort low, no tools
-  │     one LLM call → {subQuestions: [{i, question, reason}] (3–6), reason}
-  │     → emitter.plan(...)  ← BEFORE ANY RETRIEVAL (hard ordering; a plan streamed after the
-  │       fetches is a rationalisation, not a plan)
-  │     → emitter.trace({step:1, tool:'plan_research', ok:true, ms})
-  │
-  ├─ FAN-OUT  (p-limit(3) bounded concurrency)
-  │     researcher(i) = one AgentLoop per sub-question
-  │       ISOLATED per researcher: message history (its sub-question is its user turn),
-  │         provisional source numbering, trace reasons
-  │       SHARED across researchers: the single Budget (24 calls / 240 s, atomic tryReserve),
-  │         the cached SearchPort (identical sub-searches dedupe across researchers),
-  │         the emitter (every trace step and source carries subQuestion: i),
-  │         requestId / userId / spaceId
-  │       soft cap floor(24 / n) tool calls per researcher — one sub-question cannot starve
-  │         the rest; the shared hard cap still rules
-  │       a researcher's provider error fails the WHOLE run loud (502); a researcher that
-  │         merely finds little does not
-  │
-  ├─ MERGER  (core/deep/merge.ts)
-  │     dedupe key: normalized url (strip fragment/UTM) for web · docId + JSON(locator) for docs
-  │     first occurrence wins the number; later duplicates merge their subQuestion tags
-  │     contiguous renumber from 1; per-researcher localN → globalN remap table so researcher
-  │       notes handed to the synthesizer cite global numbers
-  │     contiguity + full resolution asserted before emitter.sources(...)
-  │
-  └─ SYNTHESIS (streaming): structured answer — short direct answer, a section per
-        sub-question, then "what is still unknown" — grounded only in merged sources
-     → done {depth:"deep", subQuestions: n}
+```mermaid
+flowchart TB
+    ASK["ask depth:'deep'"] --> KS{"kill switch on?"}
+    KS -- "yes" --> E503["503 — stream never starts"]
+    KS -- "no" --> DC{"deepCap: atomic $inc on userId+dayKey<br/>over DEEP_DAILY_CAP?"}
+    DC -- "yes" --> E429["429 — error + resetsAt<br/>stream never starts"]
+    DC -- "no" --> PLAN["PLANNER (core/deep/planner.ts)<br/>one LLM call · no tools · effort low · ≤ 4 s budget<br/>→ 3–6 sub-questions, each with a reason"]
+    PLAN --> PEVT["emit plan — BEFORE ANY RETRIEVAL<br/>(a plan streamed after the fetches is a rationalisation)<br/>+ trace step 1: plan_research ok:true"]
+    PEVT --> FAN["FAN-OUT · p-limit(3) bounded concurrency"]
+    FAN --> R1["researcher 1<br/>isolated AgentLoop"]
+    FAN --> R2["researcher 2<br/>isolated AgentLoop"]
+    FAN --> RN["researcher n ≤ 6<br/>isolated AgentLoop"]
+    R1 --> MERGE
+    R2 --> MERGE
+    RN --> MERGE["MERGER (core/deep/merge.ts)<br/>dedupe: normalized url (web) · docId + locator (docs)<br/>first occurrence wins · duplicates merge subQuestion tags<br/>contiguous renumber from 1 · localN → globalN remap<br/>contiguity + full resolution asserted before emit"]
+    MERGE --> SRC["emit sources — every entry subQuestion-tagged"]
+    SRC --> SYN["streamed structured synthesis<br/>short direct answer · a section per sub-question · what is still unknown<br/>grounded only in merged sources"]
+    SYN --> DONE["done — depth:'deep' · subQuestions: n"]
+
+    subgraph SHARED ["shared across researchers (isolated: message history, provisional numbering, trace reasons)"]
+        BUD["one Budget — 24 calls / 240 s<br/>atomic tryReserve · soft cap floor(24/n) per researcher"]
+        CACHE["cached SearchPort<br/>identical sub-searches dedupe across researchers"]
+        EMIT["one emitter<br/>subQuestion: i on every trace and source"]
+    end
+    FAN -.-> SHARED
 ```
 
 The bench's "deep reads ≥ 2× quick's distinct sources" falls out structurally (3–6 researchers
@@ -342,6 +314,36 @@ registry's *omission* of it is the enforcement point (rule R2).
 ## 4 · Data flow narratives
 
 ### 4.1 Quick ask
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser
+    participant G as Gateway (Cloud Run, public)
+    participant A as Agent (Cloud Run, IAM)
+    participant P as Search / Fetch providers
+    participant L as Anthropic LLM
+    participant M as Atlas
+
+    B->>G: POST /threads/:id/ask · x-user-id · depth quick
+    G->>G: request-id → auth 401 → zod 400 → rate bucket 429
+    G->>A: proxy + IAM ID token · SSE opens · headers forwarded
+    A->>M: load thread history
+    loop research · Budget 8 calls / 90 s
+        A->>L: turn (tools = quick registry — no plan_research)
+        L-->>A: tool_use blocks
+        A->>P: web_search / fetch_page (LRU → searchCache → provider)
+        P-->>A: results / page text → SourceCollector
+        A-->>B: trace event (gateway pipes bytes verbatim)
+    end
+    A-->>B: sources — always before the first token
+    A->>L: streaming synthesis (numbered sources + citation rules)
+    L-->>A: text deltas
+    A-->>B: token* (TTFT stops at the first delta)
+    A->>A: unresolvedCitations must be empty
+    A-->>B: done — latency · ttft · tokens · costUsd · searchCached · terminated
+    A->>M: persist messages · run log · requests row
+```
 
 1. Browser `POST /threads/:id/ask {query, mode, depth:"quick", spaceId?}` + `x-user-id`.
 2. Gateway: request-id (reuse or mint) → auth (401) → zod validate (400) → rate bucket (429) →
@@ -360,6 +362,32 @@ registry's *omission* of it is the enforcement point (rule R2).
 
 ### 4.2 Deep ask
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser
+    participant G as Gateway
+    participant A as Agent
+    participant L as Anthropic LLM
+    participant M as Atlas
+
+    B->>G: POST ask · depth deep
+    G->>A: proxy + IAM token
+    A->>A: kill switch? → 503
+    A->>M: deepCap atomic $inc (over cap → 429 + resetsAt, stream never starts)
+    A->>L: planner — no tools · ≤ 4 s · effort low
+    L-->>A: 3–6 sub-questions with reasons
+    A-->>B: plan — BEFORE any retrieval · + trace step 1 plan_research
+    par researchers · p-limit(3) · shared Budget 24 calls / 240 s
+        A->>A: researcher 1..n — isolated loops, every trace/source tagged subQuestion
+    end
+    A->>A: merge — dedupe · contiguous renumber · localN→globalN remap
+    A-->>B: sources — subQuestion-tagged, mixed kind when docs relevant
+    A->>L: streaming structured synthesis
+    A-->>B: token* → done — depth deep · subQuestions n · costUsd
+    Note over A,B: cap tripped anywhere → honest partial · terminated cap
+```
+
 1–2. As above with `depth:"deep"`.
 3. Agent: kill switch (503) → `deepCap` atomic `$inc` — over cap → **429 {error, resetsAt}**,
    stream never starts.
@@ -372,6 +400,42 @@ registry's *omission* of it is the enforcement point (rule R2).
 8. Cap tripped anywhere → synthesis from partial evidence, `terminated:"cap"` — honest partial.
 
 ### 4.3 Document ingestion (async, crash-safe)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser
+    participant G as Gateway
+    participant A as Agent (request path)
+    participant W as Worker (child process)
+    participant O as OpenAI embeddings
+    participant M as Atlas (GridFS · documents · jobs · chunks)
+
+    B->>G: POST /spaces/:id/documents · multipart ≤ 25 MB
+    G->>A: stream through (byte cap → 413)
+    A->>M: GridFS write · documents pending · jobs pending
+    A-->>B: 202 docId + status pending — in under 300 ms
+    W->>M: atomic claim — pending → running (claimedAt, workerId)
+    W->>W: pdfjs parse per page in a worker_thread · chunk with locators
+    W->>O: batched embeddings (1536 dims)
+    W->>M: upsert chunks (idempotent by chunk key)
+    W->>M: read-your-write probe — $vectorSearch until the chunk is visible
+    W->>M: documents indexed · job done
+    B->>G: GET /spaces/:id/documents — status ladder with pct
+```
+
+The job lifecycle as a state machine (`ingest/jobStateMachine.ts` — illegal transitions throw):
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: 202 accepted (jobs row inserted)
+    pending --> running: atomic findOneAndUpdate claim
+    running --> done: pipeline + read-your-write probe succeeded → document indexed
+    running --> failed: error — message stored, document status failed
+    running --> pending: sweeper reclaims stale claimedAt (crashed worker)
+    done --> [*]
+    failed --> [*]
+```
 
 1. `POST /spaces/:id/documents` (multipart, ≤ 25 MB, pdf/md/txt) → gateway streams through
    (Content-Length precheck + byte cap → 413).
@@ -395,6 +459,27 @@ registry's *omission* of it is the enforcement point (rule R2).
    citations.
 
 ### 4.4 Memory save / recall
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Thread A (ask)
+    participant A as Agent
+    participant O as OpenAI embeddings
+    participant M as Atlas memories (vector idx, userId filter)
+    participant V as Thread B (later ask)
+
+    U->>A: "…I build in TypeScript, prefer code examples"
+    A->>A: model calls save_memory (text, reason) — visible trace step
+    A->>O: embed text
+    A->>M: insert userId · text · embedding · sourceThread
+    V->>A: new thread — "how do I call Tavily?"
+    A->>A: model calls recall_memory (query)
+    A->>O: embed query
+    A->>M: $vectorSearch filtered by userId → top-k ≤ 10 docs
+    M-->>A: recalled preference (informs answer — never a citable source)
+    Note over A,M: GET /memory lists every row · DELETE /memory/:id removes it and the effect disappears
+```
 
 - During any ask, the model may call `save_memory {text, reason}` (stable facts/preferences
   only, per prompt discipline) → embed → insert `memories {userId, text, embedding,
@@ -603,6 +688,20 @@ checkout → setup-node 20 (npm cache) → npm ci
 ```
 
 **`.github/workflows/deploy.yml`** (push to `master`):
+
+```mermaid
+flowchart LR
+    PUSH["push to master"] --> V["verify<br/>same gates as PR"]
+    V --> BP["build-push<br/>WIF auth · both images tagged SHA<br/>→ Artifact Registry (europe-west2)"]
+    BP --> DA["deploy agent<br/>--no-traffic · tag candidate"]
+    DA --> SA{"smoke: /health 200<br/>db ok (authenticated)"}
+    SA -- "pass" --> PA["promote --to-latest"]
+    SA -- "fail" --> RB["traffic never moved<br/>previous revision serves"]
+    PA --> DG["deploy gateway<br/>--no-traffic · tag candidate"]
+    DG --> SG{"public smoke: /health 200<br/>+ one ask streams sources before token"}
+    SG -- "pass" --> PG["promote --to-latest ✅"]
+    SG -- "fail" --> RB
+```
 
 1. **verify** — the same gates as PR. Nothing deploys that didn't pass.
 2. **build-push** — `google-github-actions/auth` (WIF + deploy SA) → build both images tagged
