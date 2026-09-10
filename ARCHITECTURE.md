@@ -401,9 +401,11 @@ one deterministic originating `subQuestion` integer on the wire, never an array.
 
 The planner is invoked **deterministically by the orchestrator** rather than left for the model
 to maybe-call. It is executed through the budgeted tool dispatcher exactly once and recorded as
-`plan_research`; emit `plan` before its trace and before any retrieval. Assign that overall-plan
-trace `subQuestion: 1` (the first branch it establishes), explaining that it covers the entire
-plan; all subsequent deep traces identify the branch they actually serve. Remove the planner
+`plan_research`; emit `plan` before its trace and before any retrieval. **Omit `subQuestion` on
+the planner's trace step** — it serves the whole question, not one branch, and the bench's
+attribution check deliberately excludes `plan_research` for exactly this reason
+(`bench.mjs` ~L609: requiring an index there "would fail a correct implementation"); all
+subsequent retrieval traces identify the branch they actually serve. Remove the planner
 from researcher tool sets after planning; also reject unauthorized tool names in the dispatcher,
 not only in the model's advertised tool list. Quick can never invoke it. Invalid plans fail
 loudly; a 4 s deadline alone does not prove a 4 s successful-plan p95.
