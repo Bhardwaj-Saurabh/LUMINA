@@ -33,7 +33,7 @@ flowchart TB
 
     AG["lumina-agent · Cloud Run NOT public, IAM-gated · Express :8000<br/>agent loop (quick/deep) · tool registry · planner → fan-out → merge<br/>memory · hybrid RAG · jobs worker (child process)<br/>spend gates · run logs — ALL provider keys live here"]
 
-    LLM["Anthropic API<br/>claude-sonnet-5"]
+    LLM["Azure OpenAI<br/>gpt-5.4-mini (loop) · gpt-5.4 (available)"]
     SRCH["Tavily / SerpApi<br/>env-swappable"]
     EMB["OpenAI embeddings<br/>text-embedding-3-small · 1536d"]
     DB[("MongoDB Atlas M0 · europe-west2<br/>threads · messages · memories(vec) · spaces · documents<br/>chunks(vec + BM25) · searchCache(TTL) · jobs<br/>requests · runs · GridFS uploads")]
@@ -153,7 +153,8 @@ http/
 
 providers/                   ← ports & adapters. ONLY these files import SDKs or read `secrets`.
   llm/port.ts                LlmPort { runTurn(...), streamText(...) } — usage returned per call
-  llm/anthropic.ts           @anthropic-ai/sdk adapter; typed errors → ProviderError{retryable}
+  llm/azureOpenai.ts         `openai` SDK's AzureOpenAI client (endpoint + api-version +
+                             deployment names from env); typed errors → ProviderError{retryable}
   search/port.ts             SearchPort { search(q, opts) }
   search/tavily.ts           Tavily adapter (search + extract)
   search/serpapi.ts          SerpApi adapter (+ readability/jsdom for page text)
@@ -423,7 +424,7 @@ sequenceDiagram
     participant G as Gateway (Cloud Run, public)
     participant A as Agent (Cloud Run, IAM)
     participant P as Search / Fetch providers
-    participant L as Anthropic LLM
+    participant L as Azure OpenAI LLM
     participant M as Atlas
 
     B->>G: POST /threads/:id/ask · x-user-id · depth quick
@@ -470,7 +471,7 @@ sequenceDiagram
     participant B as Browser
     participant G as Gateway
     participant A as Agent
-    participant L as Anthropic LLM
+    participant L as Azure OpenAI LLM
     participant M as Atlas
 
     B->>G: POST ask · depth deep
@@ -670,7 +671,7 @@ sequenceDiagram
 | 7 | Per-user daily deep cap | `guards/deepCap.ts` in agent | Unique user/day key, conditional reservation and duplicate-admission protection; never increment then compensate after rejecting; §5.1. |
 | 8 | Global kill switch | `guards/killSwitch.ts` | `ASK_DISABLED=1` / `SPEND_KILL_SWITCH=1` rejects new asks with 503. Env updates create revisions; existing streams are not instantly cancelled. Durable aggregate spend reservations block new work at the configured global cap. |
 | 9 | Rate limiting | gateway `rateLimit.ts` | Token bucket per asserted user, burst 10, refill `RATE_LIMIT_PER_MINUTE/60`; 429 + Retry-After. Course gateway max 1: still resets on restart and may overlap during rollout. Not a durable global limit; agent spend admission is authoritative. Before scaling, use shared rate-limit state. |
-| 10 | Timeouts / retries / circuit breakers | `infra/resilience.ts`, applied per port | **Anthropic:** 60 s/turn, SDK retries 2 (pre-stream only). **Tavily/SerpApi:** 10 s, 1 retry on 5xx/network; breaker opens after 5 failures/30 s, half-open probe at 15 s — an open breaker is an immediate loud 502, never a fabricated result. **OpenAI embeddings:** 30 s, 3 retries with jittered backoff (worker path tolerates latency). **Mongo:** `serverSelectionTimeoutMS: 5000`; `/health` reports `db: "down"` truthfully. |
+| 10 | Timeouts / retries / circuit breakers | `infra/resilience.ts`, applied per port | **Azure OpenAI (chat):** 60 s/turn, SDK retries 2 (pre-stream only). **Tavily/SerpApi:** 10 s, 1 retry on 5xx/network; breaker opens after 5 failures/30 s, half-open probe at 15 s — an open breaker is an immediate loud 502, never a fabricated result. **Azure OpenAI embeddings:** 30 s, 3 retries with jittered backoff (worker path tolerates latency). **Mongo:** `serverSelectionTimeoutMS: 5000`; `/health` reports `db: "down"` truthfully. |
 | 11 | Secret/PII hygiene in logs | both services, pino config + `guards/redact.ts` | `redact` paths for auth headers and key-shaped fields; question text logged as length/hash at `info` (full text only at `debug`); outbound error messages scrubbed against loaded secret values — a provider error that echoes a key must never reach a client or a log line. |
 | 12 | Fail-loud invariant | agent error middleware + loop | Exhausted provider failure → terminal error + sibling cancellation; HTTP 502 before headers or SSE error afterward. Recoverable tool-input validation, ordinary cache misses, and truthful degraded health are not provider-success fallbacks. Cache infrastructure errors are logged explicitly; persistence errors are terminal; §3.1. |
 | 13 | Ownership | `guards/ownership.ts` + scoped repositories | Authorize every requested resource, not merely the header or vector filter; foreign IDs → 404; both retrieval branches scoped; §4.5. |
@@ -726,7 +727,7 @@ on the selected tier instead of treating an M0 diagram as proof of availability.
 | Instances | min 0 (raise to 1 for latency measurements), max 1 for the course limiter | **min 1, max 1** (course scale, not a distributed-lock guarantee) |
 | Concurrency | 80 | 20 (deep runs are I/O-bound) |
 | Request timeout | 320 s | 300 s (deep cap 240 s + margin; gateway ≥ agent) |
-| Env / secrets | `AGENT_URL`, `CORS_ORIGINS`, rate-limit knobs — no secrets | `--set-secrets`: `MONGODB_URI`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY` from **Secret Manager** (runtime SA holds per-secret `secretAccessor`) |
+| Env / secrets | `AGENT_URL`, `CORS_ORIGINS`, rate-limit knobs — no secrets | `--set-secrets`: `MONGODB_URI`, `AZURE_OPENAI_KEY`, `TAVILY_API_KEY` from **Secret Manager** (endpoint/deployment names are plain env vars, not secrets; runtime SA holds per-secret `secretAccessor`) |
 
 ### 6.2 Decisions and rationale
 
@@ -1069,5 +1070,6 @@ need; the module list is a responsibility map, not a requirement to scaffold eve
 
 *Document owner: Saurabh Bhardwaj · Stack: Vercel UI + MERN backends on GCP (Cloud Run,
 europe-west2, backend host approval pending) · LLM:
-Anthropic claude-sonnet-5 (direct API) · Search: Tavily (env-swappable) · Embeddings: OpenAI
-text-embedding-3-small · Store: MongoDB Atlas M0 (Vector + Search + GridFS).*
+Azure OpenAI (gpt-5.4 family, deployment-addressed) · Search: Tavily (env-swappable) · Embeddings:
+Azure OpenAI text-embedding-3-large at `dimensions: 1536` (the contract requires 1536) · Store:
+MongoDB Atlas M0 (Vector + Search + GridFS).*

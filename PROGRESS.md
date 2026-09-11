@@ -10,7 +10,7 @@
 | | |
 |---|---|
 | **Current milestone** | M1 — environment & Atlas indexes |
-| **Blockers** | `.env` missing: needs Atlas M0 URI (GCP europe-west2), ANTHROPIC_API_KEY, TAVILY_API_KEY, OPENAI_API_KEY — user-side |
+| **Blockers** | `.env` partially filled: Azure OpenAI ✅ (endpoint, key, gpt-5.4 deployments, text-embedding-3-large → use `dimensions: 1536`). Still missing: `MONGODB_URI` (Atlas M0, GCP europe-west2 — free) and `TAVILY_API_KEY` (free) — user-side. Azure AI Search vars present but unused (assignment's RAG contract is Atlas). |
 | **Last gates run** | none yet (backend is the provided 501 skeleton) |
 | **Deploy state** | not deployed |
 
@@ -40,3 +40,4 @@ Legend: ☐ not started · 🔨 in progress · ✅ done (EDD proof recorded)
 | 2026-09-09 | CLAUDE.md created | n/a | — | plan GCP architecture | |
 | 2026-09-10 | ARCHITECTURE.md written (GCP/Cloud Run, Mermaid), then hardened in review (durable admission, evidence workflow, Vercel-submitted UI); CLAUDE.md synced; DESIGN.md drafted + reformatted | n/a | — | delivery tooling | Planner trace: omit `subQuestion` (bench excludes plan_research from attribution) |
 | 2026-09-11 | Delivery tooling: PROGRESS.md, skills (lumina-tdd, lumina-edd, lumina-track), agents (test-writer, implementer, gate-runner, red-line-auditor), delivery rules in CLAUDE.md, vitest wiring + seed tests | seed ✅ | typecheck/lint ✅ · quality C1 ✅ | M1: user supplies Atlas URI + API keys → `.env` → indexes | |
+| 2026-09-11 | LLM switched to **Azure OpenAI** (user's work access; gpt-5.4 deployments in `.env`); docs updated (ARCHITECTURE, CLAUDE, this file). Embeddings: text-embedding-3-large with `dimensions: 1536` | n/a | — | M1 still blocked: Atlas URI + Tavily key | Azure key echoed to terminal during check — rotate after project; confirm work-resource policy |
