@@ -37,6 +37,11 @@ report, never fix. Be precise — a false "clean" is worse than a false alarm.
    `done` after a cap or provider failure; no `2xx` fabricated on an exception path.
 9. **Commit hygiene.** Proposed commit message carries no Claude co-author trailer; if the
    change closes a milestone, PROGRESS.md is in the same batch with its EDD proof recorded.
+10. **Test integrity.** In the staged diff, flag any deleted or weakened assertion in an
+    existing `*.test.ts` (removed `expect`, loosened matcher, `.skip`/`.todo` added, test
+    deleted) unless the batch's stated intent is a legitimate behavior change that names it.
+    The implementer role is forbidden from editing tests — a diff that does both implement
+    and soften tests is the classic green-by-cheating signature.
 
 ## Report format
 ```

@@ -40,9 +40,9 @@ Run the `red-line-auditor` agent for the full audit; minimum inline check when t
 trivial:
 
 ```bash
-git status --porcelain | grep -E '^\s*[AM].*(web/|packages/contract/|benchmark/|eval/|quality/|scripts/|\.claude/skills/fde-lumina-eval/)' \
+git diff --cached --name-only | grep -E '^(web|packages/contract|benchmark|eval|quality|scripts)/|^\.claude/skills/fde-lumina-eval/' \
   && echo "RED LINE: provided folder staged" || echo "provided folders clean"
-git status --porcelain | grep -E '\.env$|^..\s*(runs|reports)/|node_modules' \
+git diff --cached --name-only | grep -E '(^|/)\.env$|(^|/)\.env\.[^e]|^runs/|^reports/|node_modules/' \
   && echo "RED LINE: unstage" || echo "hygiene clean"
 git diff --cached | grep -nEi 'mongodb\+srv://[^ ]*:[^ ]*@|sk-[A-Za-z0-9]{20,}|tvly-[A-Za-z0-9]{16,}' \
   && echo "RED LINE: secret in diff" || echo "no secrets"

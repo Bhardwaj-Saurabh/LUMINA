@@ -12,8 +12,9 @@ TDD is how we arrive at code that passes them without thrashing.
 ## The loop (non-negotiable order)
 
 1. **Red.** Write a failing test for the next small behavior. Run it. **Confirm it fails for
-   the expected reason** — a test that fails because of a typo or missing import proves
-   nothing. If delegating, the `test-writer` agent does this step and must report the failure
+   the expected reason.** A failure because the module under test does not exist yet is a
+   valid red; a failure from a typo or a wrong path to an existing module proves nothing.
+   If delegating, the `test-writer` agent does this step and must report the failure
    message verbatim.
 2. **Green.** Write the minimal implementation that passes. No speculative structure — the
    module layout comes from ARCHITECTURE.md §2, but files are created when a test demands
@@ -47,6 +48,11 @@ including "trivial" guards — gets a red test first.
   parsing it with the zod schema from `@lumina/contract`, so tests can't drift from the wire.
 - **Every gate/bench failure gets a regression test first**, reproducing the failure at the
   smallest layer that exhibits it, before the fix. This is how EDD failures feed back into TDD.
+- **Deterministic or it doesn't merge.** No real `Date.now()`/randomness in assertions:
+  deadline and budget tests use `vi.useFakeTimers()` or an injected clock; ids/randomness are
+  injected. Shared fakes live in `src/testing/` per workspace.
+- **Node16 ESM imports**: relative imports carry the `.js` extension even in `.ts` files,
+  matching the skeleton (`./env.js`); vitest resolves them to the `.ts` source.
 - Tests never hit the network, never read `.env` secrets, never require Mongo. (Integration
   against `docker compose up mongo` is allowed later for repo/worker paths, marked and skipped
   by default; correctness claims still come from the gates.)

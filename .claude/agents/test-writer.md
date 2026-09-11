@@ -16,9 +16,18 @@ You write the RED phase of LUMINA's TDD loop and nothing else.
 ## You must not
 - Create or modify any implementation file, any provided folder (`web/`, `packages/contract/`,
   `benchmark/`, `eval/`, `quality/`, `scripts/`, `.claude/skills/fde-lumina-eval/`), or any
-  config/threshold. If a test needs an interface that doesn't exist yet, define the expectation
-  against the intended import path from ARCHITECTURE.md §2 — the failing import IS a valid red.
+  config/threshold. If a test needs a module that doesn't exist yet, import the intended path
+  from ARCHITECTURE.md §2 — a failure because **the module does not exist yet** is a valid
+  red; a failure from a wrong path to an **existing** module is a broken test, not red.
 - Weaken an assertion to make a future green easier.
+
+## Repo-specific conventions (get these wrong and nothing runs)
+- **Node16 ESM**: relative imports use the `.js` extension even from `.ts` files
+  (`import { env } from './env.js'`) — match the skeleton; vitest resolves them to `.ts`.
+- **Determinism**: no real time or randomness in assertions. Deadline/budget tests use
+  `vi.useFakeTimers()` or an injected clock; anything random in the subject gets injected.
+- Shared fakes (scripted ports, collecting emitter) live in `src/testing/` of the workspace,
+  so every test scripts the same fakes instead of re-inventing them.
 
 ## Method
 1. Derive expected behavior from the contract first (parse events/bodies with the actual zod

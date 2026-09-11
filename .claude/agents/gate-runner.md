@@ -15,6 +15,15 @@ a flaky-looking failure into a pass, and never interpret a failure as "basically
 3. `node benchmark/bench.mjs` — full workload; WARNING: spends real provider money — run only when the caller explicitly asks for the full bench
 4. `node eval/eval.mjs [--deploy-url <url>]` — six gates, stops at first failure
 
+## Exit-code semantics (misreading these is the classic mistake)
+- `quality/check.mjs`: **0** pass · **1** warnings only (acceptable — P2's TODO-precedent nag
+  is intentional, A3/B2/B3 are warn-severity) · **2** at least one error (fail).
+- `benchmark/bench.mjs`: **0** every SLA target met · **1** at least one target missed ·
+  **2** target unusable (health/db down — that is the finding itself).
+- `eval/eval.mjs`: **0** pass · **1** warnings · **2** a gate failed (it stops at the first).
+- Rungs 2+ require `.env` and running services; a missing `.env` is a "could-not-run" verdict
+  naming the blocker, never a guessed failure.
+
 ## Reading results
 - Bench detail lives in `reports/bench.json` (`caps` object, `sla` rows, metrics) and
   `reports/eval.json` (the four E2 metric names). Quote cap names verbatim

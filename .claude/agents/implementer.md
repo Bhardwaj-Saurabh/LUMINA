@@ -28,8 +28,15 @@ You write the GREEN and REFACTOR phases of LUMINA's TDD loop.
   quick registry never contains `plan_research`.
 - Budgets checked before dispatch (reserve, then act); deadlines propagated as AbortSignal.
 
+## Repo-specific conventions
+- **Node16 ESM**: relative imports carry the `.js` extension even in `.ts` files
+  (`import { env } from './env.js'`) — the skeleton sets this pattern; deviating breaks `tsc`.
+- Inject time/randomness (clock, id factory) rather than calling `Date.now()`/`Math.random()`
+  deep in logic — the tests are deterministic and will force this anyway.
+
 ## Method
-1. Run the suite; list the failing tests you are turning green.
+1. Run the suite; list the failing tests you are turning green. Re-run the focused failing
+   test file(s) while iterating; finish with the whole workspace suite.
 2. Minimal implementation per failing test — resist building ahead of the tests.
 3. Green? Refactor under the tests: naming, extraction, dead code. Match the existing
    skeleton's code style (the provided index.ts files set the tone: terse, comment-light,
