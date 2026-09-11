@@ -21,6 +21,7 @@
     "worker": "npm run worker -w @lumina/agent",
     "build": "npm run build -w @lumina/contract && npm run build -w @lumina/agent && npm run build -w @lumina/gateway && npm run build -w @lumina/web",
     "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
     "lint": "eslint .",
     "indexes": "node scripts/create-indexes.mjs",
     "export:runs": "node scripts/export-runs.mjs",

@@ -73,6 +73,17 @@ rate limit → 429, X-Request-Id, pino log, SSE pass-through, serves web/dist)
 - The deep-search cap belongs in the agent service, not the gateway (a cap on the edge can be bypassed by hitting the agent directly); in deploys, the agent service must not be publicly reachable.
 - `web/dist/`, `runs/`, `reports/`, `.env` are git-ignored and must never be committed.
 
+## Delivery rules (EDD + TDD)
+
+The delivery process is tooled — use it, don't freestyle:
+
+- **TDD is mandatory** for all backend implementation: follow the `lumina-tdd` skill (red → green → refactor; fake ports, contract-schema assertions; composition roots/adapters are the only exceptions). No implementation before a test seen failing for the right reason.
+- **EDD closes milestones**: the provided gates ARE the evals — follow the `lumina-edd` skill (run the milestone's gate red before building, green after, record both in PROGRESS.md). Smoke bench cannot prove memory/RAG/deep — those need the full bench. Full bench spends real money; batch it.
+- **PROGRESS.md is the state of record** (milestones M0–M10 + session log). Maintain it via the `lumina-track` skill; a milestone is ✅ only with a recorded gate result; update it in the same commit as the work it describes. Start sessions by orienting through `lumina-track`.
+- **Role separation when delegating**: failing tests → `test-writer` agent; making them pass → `implementer` agent; running gates → `gate-runner` agent (reports, never fixes); before every commit batch and deploy → `red-line-auditor` agent.
+- **Never**: weaken/edit a threshold or provided file · fabricate or extrapolate a gate number (a gate that couldn't run is "not run") · delete real failed runs from `runs/` (the deliberate P1 failure lives in `runs/failing/`) · report a capped/failed run as done.
+- Small commits per milestone step, pushed to origin.
+
 ## Repo conventions
 
 - Git commits: no Claude co-author trailer; commit messages are attributed solely to the repo owner.
