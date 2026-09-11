@@ -9,9 +9,9 @@
 
 | | |
 |---|---|
-| **Current milestone** | M1 — environment & Atlas indexes |
-| **Blockers** | `.env` partially filled: Azure OpenAI ✅ (endpoint, key, gpt-5.4 deployments, text-embedding-3-large → use `dimensions: 1536`). Still missing: `MONGODB_URI` (Atlas M0, GCP europe-west2 — free) and `TAVILY_API_KEY` (free) — user-side. Azure AI Search vars present but unused (assignment's RAG contract is Atlas). |
-| **Last gates run** | none yet (backend is the provided 501 skeleton) |
+| **Current milestone** | M2 — quick vertical slice (loop, SSE, sources, run log) |
+| **Blockers** | none |
+| **Last gates run** | 2026-09-11: `create-indexes.mjs --status` → all 3 search indexes READY (queryable); agent `/health` → `db: ok`, `vectorStore: atlas-vector-search` |
 | **Deploy state** | not deployed |
 
 ## Milestones
@@ -21,7 +21,7 @@ Legend: ☐ not started · 🔨 in progress · ✅ done (EDD proof recorded)
 | ID | Scope | TDD surface | EDD proof (gate / bench caps) | Status |
 |----|-------|-------------|-------------------------------|--------|
 | M0 | Scaffold verified: `npm install`, contract builds, typecheck clean | — | `npm run typecheck` exit 0 (2026-09-09) | ✅ |
-| M1 | `.env` filled; `node scripts/create-indexes.mjs` run; 3 search indexes queryable | — | `create-indexes.mjs --status`: all queryable | ☐ |
+| M1 | `.env` filled; `node scripts/create-indexes.mjs` run; 3 search indexes queryable | — | 2026-09-11: `--status` → memories_vector, chunks_vector, chunks_text all READY (queryable); `/health` db ok against Atlas | ✅ |
 | M2 | Quick vertical slice: `POST /threads`, ask loop (web_search + fetch_page), SSE `trace→sources→token→done`, SourceCollector, budget, run log | budget, sourceCollector, citations units; loop test w/ fake ports + collecting emitter; ask route supertest | bench `--smoke` completes; `sourcesBeforeFirstToken`; `contractProbes` (401/404/400); one `runs/*.json` + `quality/check.mjs` reads it | ☐ |
 | M3 | Two-tier search cache (LRU → `searchCache` TTL) | cache key sha256, decorator hit/miss units | repeat query → `done.searchCached: true`; bench cache-hit ≥ 50 % on workload | ☐ |
 | M4 | Threads + messages persistence; follow-ups see the thread | threads/messages repo units; getThread route test | UI thread reload; bench web workload green | ☐ |
@@ -41,3 +41,4 @@ Legend: ☐ not started · 🔨 in progress · ✅ done (EDD proof recorded)
 | 2026-09-10 | ARCHITECTURE.md written (GCP/Cloud Run, Mermaid), then hardened in review (durable admission, evidence workflow, Vercel-submitted UI); CLAUDE.md synced; DESIGN.md drafted + reformatted | n/a | — | delivery tooling | Planner trace: omit `subQuestion` (bench excludes plan_research from attribution) |
 | 2026-09-11 | Delivery tooling: PROGRESS.md, skills (lumina-tdd, lumina-edd, lumina-track), agents (test-writer, implementer, gate-runner, red-line-auditor), delivery rules in CLAUDE.md, vitest wiring + seed tests | seed ✅ | typecheck/lint ✅ · quality C1 ✅ | M1: user supplies Atlas URI + API keys → `.env` → indexes | |
 | 2026-09-11 | LLM switched to **Azure OpenAI** (user's work access; gpt-5.4 deployments in `.env`); docs updated (ARCHITECTURE, CLAUDE, this file). Embeddings: text-embedding-3-large with `dimensions: 1536` | n/a | — | M1 still blocked: Atlas URI + Tavily key | Azure key echoed to terminal during check — rotate after project; confirm work-resource policy |
+| 2026-09-11 | **M1 closed**: Atlas URI + Tavily key landed; 14 regular indexes + 3 search indexes created, all queryable in ~30 s; agent `/health` green against Atlas; `.env` gains `LLM_PROVIDER=azure-openai`, `LLM_MODEL=gpt-5.4-mini` | n/a | indexes ✅ · health ✅ | M2 red phase: test-writer on Budget + SourceCollector, then loop | user's `.env` is hand-rolled, not a copy of the example — defaults apply for unset vars |
