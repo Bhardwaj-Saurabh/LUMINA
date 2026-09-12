@@ -16,6 +16,8 @@ export interface ToolDef {
   name: string;
   description: string;
   schema: z.ZodTypeAny;
+  /** JSON-schema advertisement for the provider; zod v3 can't derive it, so tools declare both. */
+  inputJsonSchema?: Record<string, unknown>;
   // Method syntax on purpose: bivariant params let a tool declare its parsed input type.
   execute(input: unknown, ctx: ToolContext): Promise<unknown>;
   deepOnly?: boolean;

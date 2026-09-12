@@ -53,6 +53,11 @@ export interface RunLoopInput {
   price: (usage: LlmUsage) => number;
   /** Evaluated at done-time; true only when every search in the request was a cache hit. */
   searchCached: () => boolean;
+  /**
+   * Deadline signal factory (default AbortSignal.timeout) — injectable so tests control
+   * time. An abort fired by this signal is a BUDGET event and maps to cap, never error.
+   */
+  makeSignal?: (ms: number) => AbortSignal;
 }
 
 export interface RunLoopOutcome {
@@ -69,9 +74,12 @@ function errorText(err: unknown): string {
   return msg.trim() || 'unknown error';
 }
 
-// The provider adapter owns real zod→JSON-schema derivation; the loop only advertises.
 function toToolSpec(def: ToolDef): LlmToolSpec {
-  return { name: def.name, description: def.description, inputSchema: { type: 'object' } };
+  return {
+    name: def.name,
+    description: def.description,
+    inputSchema: def.inputJsonSchema ?? { type: 'object' }
+  };
 }
 
 export async function runLoop(input: RunLoopInput): Promise<RunLoopOutcome> {
@@ -83,11 +91,25 @@ export async function runLoop(input: RunLoopInput): Promise<RunLoopOutcome> {
   // --- research: tool-use turns until natural end_turn or refused admission (cap) ------
   let terminated: Terminated = 'done';
   let step = 0;
+  const makeSignal = input.makeSignal ?? ((ms: number) => AbortSignal.timeout(ms));
+
   research: for (;;) {
+    // §3.1: a hung provider call must not outlive the request budget (found live: a turn
+    // that ran 295 s on a 90 s quick cap because nothing aborted it).
+    const remaining = budget.remainingMs();
+    if (remaining <= 0) {
+      terminated = 'cap';
+      break research;
+    }
+    const signal = makeSignal(remaining);
     let turn;
     try {
-      turn = await llm.runTurn({ system: SYSTEM_PROMPT, messages, tools });
+      turn = await llm.runTurn({ system: SYSTEM_PROMPT, messages, tools, signal });
     } catch (err) {
+      if (signal.aborted) {
+        terminated = 'cap'; // the budget ended the turn, not the provider
+        break research;
+      }
       emitter.error({ status: 502, error: errorText(err) });
       return { terminated: 'error' };
     }
@@ -140,18 +162,38 @@ export async function runLoop(input: RunLoopInput): Promise<RunLoopOutcome> {
 
   let fullText = '';
   let ttftMs: number | undefined;
-  try {
-    const synthesis = llm.streamText({ system: SYSTEM_PROMPT, messages });
-    for await (const delta of synthesis.stream) {
-      if (ttftMs === undefined) ttftMs = now() - startedAt;
-      emitter.token({ text: delta });
-      fullText += delta;
+  const synthesisMs = budget.remainingMs();
+  if (synthesisMs <= 0) {
+    // §3.1 "reserve the finish": no generation allowance left — a deterministic,
+    // clearly incomplete summary, without another provider call. No [n] → audit passes.
+    const partial =
+      'The time budget was exhausted before an answer could be synthesized. ' +
+      (sources.length > 0
+        ? 'The sources listed were retrieved but not yet read into an answer.'
+        : 'No evidence was retrieved.');
+    emitter.token({ text: partial });
+    fullText = partial;
+    terminated = 'cap';
+  } else {
+    const signal = makeSignal(synthesisMs);
+    try {
+      const synthesis = llm.streamText({ system: SYSTEM_PROMPT, messages, signal });
+      for await (const delta of synthesis.stream) {
+        if (ttftMs === undefined) ttftMs = now() - startedAt;
+        emitter.token({ text: delta });
+        fullText += delta;
+      }
+      const usage = await synthesis.usage();
+      budget.recordUsage({ tokensIn: usage.in, tokensOut: usage.out, costUsd: price(usage) });
+    } catch (err) {
+      if (!signal.aborted) {
+        emitter.error({ status: 502, error: errorText(err) });
+        return { terminated: 'error' };
+      }
+      // Budget cut synthesis short: the visible answer is incomplete and says so via
+      // terminated:'cap' — provided its citations still resolve (checked below).
+      terminated = 'cap';
     }
-    const usage = await synthesis.usage();
-    budget.recordUsage({ tokensIn: usage.in, tokensOut: usage.out, costUsd: price(usage) });
-  } catch (err) {
-    emitter.error({ status: 502, error: errorText(err) });
-    return { terminated: 'error' };
   }
 
   const dangling = unresolvedCitations(fullText, sources);

@@ -42,6 +42,8 @@ export interface RunAskInput {
   threadId: string;
   userId: string;
   emitter: AskEmitter;
+  /** Gateway-forwarded x-request-id when present; runAsk mints one otherwise. */
+  requestId?: string;
 }
 
 export interface AgentAppDeps {
@@ -139,11 +141,13 @@ export function makeAgentApp(deps: AgentAppDeps): express.Express {
       }
       const sink = createSseSink(res);
       try {
+        const inboundRequestId = req.header('x-request-id');
         await deps.runAsk({
           body: parsed.data,
           threadId: thread.threadId,
           userId: userOf(res),
-          emitter: sink
+          emitter: sink,
+          ...(inboundRequestId ? { requestId: inboundRequestId } : {})
         });
       } finally {
         sink.close();

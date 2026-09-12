@@ -551,3 +551,45 @@ describe('runLoop empty retrieval', () => {
     expect(outcome.terminated).toBe('done');
   });
 });
+
+// ---------------------------------------------------------------------------
+// i. REGRESSION (found live 2026-09-12): a hung provider turn must not outlive
+// the budget — the deadline signal aborts it and the abort maps to cap, not error.
+// A quick run once ran 295 s against the 90 s cap because nothing aborted the call.
+// ---------------------------------------------------------------------------
+
+describe('runLoop deadline signal', () => {
+  it('aborts a hung research turn at the deadline and finishes as an honest cap, never error', async () => {
+    const h = harness([], {
+      deltas: ['Cut short by the time budget: partial answer from evidence gathered so far.'],
+      usage: { in: 10, out: 5 }
+    });
+    let captured: AbortController | undefined;
+    const hangingLlm = {
+      runTurn: (input: { signal?: AbortSignal }) =>
+        new Promise<never>((_, reject) => {
+          input.signal?.addEventListener('abort', () => reject(new Error('request aborted')));
+        }),
+      streamText: h.llm.streamText.bind(h.llm)
+    };
+    const makeSignal = (_ms: number) => {
+      captured = new AbortController();
+      return captured.signal;
+    };
+
+    const run = runLoop(loopInput(h, { llm: hangingLlm, makeSignal }) as never);
+    // Let the loop reach the hung turn, then fire the deadline.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(captured).toBeDefined();
+    captured!.abort();
+    const outcome = await run;
+
+    expect(outcome.terminated).toBe('cap');
+    expect(framesOf(h.emitter, 'error')).toHaveLength(0);
+    const names = eventNames(h.emitter);
+    expect(names[0]).toBe('sources'); // sources still precede the (partial) answer
+    const done = DoneEvent.parse(framesOf(h.emitter, 'done')[0]!.data);
+    expect(done.terminated).toBe('cap');
+    expect(answerText(h.emitter).length).toBeGreaterThan(0); // honest partial, visibly there
+  });
+});

@@ -47,6 +47,8 @@ export interface RunTurnInput {
   system: string;
   messages: LlmMessage[];
   tools: LlmToolSpec[];
+  /** Deadline propagation (§3.1): a hung provider call must not outlive the request budget. */
+  signal?: AbortSignal;
 }
 
 export interface RunTurnResult {
@@ -59,6 +61,7 @@ export interface RunTurnResult {
 export interface StreamTextInput {
   system: string;
   messages: LlmMessage[];
+  signal?: AbortSignal;
 }
 
 /**

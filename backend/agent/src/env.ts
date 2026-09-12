@@ -20,6 +20,25 @@ export const env = {
   llmProvider: process.env.LLM_PROVIDER ?? 'anthropic',
   llmModel: process.env.LLM_MODEL ?? 'claude-sonnet-5',
 
+  // Azure OpenAI (decided 2026-09-11): deployments are addressed by name, not model id.
+  azureOpenaiEndpoint: process.env.AZURE_OPENAI_ENDPOINT ?? '',
+  azureOpenaiApiVersion: process.env.AZURE_OPENAI_API_VERSION ?? '2026-03-17',
+  azureChatDeployment:
+    process.env.AZURE_OPENAI_CHAT_DEPLOYMENT ?? process.env.AZURE_OPENAI_MINI_DEPLOYMENT ?? '',
+  azureEmbeddingDeployment: process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT ?? '',
+
+  // PLACEHOLDER rates (USD per MTok) — set your provider's published prices before
+  // trusting any dollar figure; sla.json's cost_model must be re-declared to match.
+  llmInputUsdPerMtok: num(process.env.LLM_INPUT_USD_PER_MTOK, 0.25),
+  llmOutputUsdPerMtok: num(process.env.LLM_OUTPUT_USD_PER_MTOK, 2.0),
+
+  // Reserved so a cap can never starve the answer itself (ARCHITECTURE §3.1).
+  synthesisAllowanceMs: num(process.env.SYNTHESIS_ALLOWANCE_MS, 15000),
+  synthesisAllowanceUsd: num(process.env.SYNTHESIS_ALLOWANCE_USD, 0.01),
+  maxUsdQuick: num(process.env.MAX_USD_QUICK, 0.05),
+  maxUsdDeep: num(process.env.MAX_USD_DEEP, 0.35),
+  maxTokensPerRun: num(process.env.MAX_TOKENS_PER_RUN, 180000),
+
   searchProvider: (process.env.SEARCH_PROVIDER ?? 'tavily') as 'tavily' | 'serpapi',
   searchCacheTtlSeconds: num(process.env.SEARCH_CACHE_TTL_SECONDS, 21600),
 
@@ -46,6 +65,7 @@ export const env = {
 export const secrets = {
   anthropic: process.env.ANTHROPIC_API_KEY ?? '',
   openai: process.env.OPENAI_API_KEY ?? '',
+  azureOpenai: process.env.AZURE_OPENAI_KEY ?? '',
   tavily: process.env.TAVILY_API_KEY ?? '',
   serpapi: process.env.SERPAPI_API_KEY ?? ''
 } as const;

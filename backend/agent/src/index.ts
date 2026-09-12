@@ -1,65 +1,37 @@
 /**
- * LUMINA agent service — the AI backend. PROVIDED SKELETON: YOU BUILD THIS OUT.
- * This is where the real work is. Provider keys live only in this process.
- *
- * What is already here: the server, /health (Mongo ping + which model, provider and
- * vector backend are live), and a 501 for every other route.
- *
- * What you build (README Part 1, in this order — each step is testable with curl -N):
- *   1. the QUICK loop: plan → choose tool → observe → repeat → answer, with web_search
- *      and fetch_page, streaming trace → sources → token → done. sources BEFORE the
- *      first token. Disable compression on this route and flush after every event.
- *   2. the search cache: in-process LRU over the searchCache collection (TTL index),
- *      key = sha256(normalized query + provider). searchCached only when every hit.
- *   3. threads + messages, so a follow-up sees the thread.
- *   4. memory: save_memory / recall_memory over the memories vector index; GET /memory,
- *      DELETE /memory/:id.
- *   5. the run log: one runs/<requestId>.json per answer, in the RunLog shape from the
- *      contract. Ten lines. The gates read it, so it is not optional.
- *   6. spaces + the jobs worker: upload → GridFS → parse → chunk → embed → upsert →
- *      read-your-write probe → indexed.
- *   7. hybrid retrieval: $vectorSearch + $search fused with RRF, page locators.
- *   8. DEEP search (depth: "deep"): plan_research decomposes the question into 3–6
- *      sub-questions, you stream a `plan` event BEFORE retrieving anything, research each
- *      sub-question, then merge the results into ONE citation numbering and synthesise.
- *      Every trace step and every source carries the subQuestion it served. Deep runs
- *      under the wider caps (maxToolCallsDeep, maxWallClockSecDeep) and behind
- *      DEEP_DAILY_CAP → 429 {error, resetsAt}.
- *
- * Three rules to hold on to while you write it:
- *   - Fail loud. A provider exception ends the run with terminated:"error" and a 502.
- *     Never a try/catch that returns a plausible answer. (Live Translate served English
- *     for weeks because of exactly that catch.)
- *   - Grounded or nothing. A citation that does not resolve to something retrieved in
- *     THIS request is an automatic fail.
- *   - Depth is opted into, never drifted into. A quick search may not call plan_research,
- *     however much the model would like to. Deep costs several times more, and a product
- *     that escalates itself is a product with an unbounded bill.
+ * LUMINA agent service — composition root. Wires real adapters (Azure OpenAI, Tavily,
+ * Mongo repos) into makeAgentApp. All provider keys are read in env.ts and injected here;
+ * no other module may touch them (ARCHITECTURE §2.2). Routes not yet built still answer
+ * 501 via the app factory, so the UI's "not implemented yet" remains the progress bar.
  */
-import express from 'express';
 import pino from 'pino';
 import { mkdirSync } from 'node:fs';
-import { HealthResponse, ROUTES } from '@lumina/contract';
-import { env } from './env.js';
-import { pingDb } from './db.js';
+import type { HealthResponse } from '@lumina/contract';
+import { env, secrets } from './env.js';
+import { db, pingDb } from './db.js';
+import { makeAgentApp } from './http/app.js';
+import { makeRunAsk } from './http/runAsk.js';
+import { makeAzureOpenAiLlm } from './providers/llm/azureOpenai.js';
+import { makeTavilySearch, makeTavilyFetchPage } from './providers/search/tavily.js';
+import { makeThreadsRepo } from './repos/threads.js';
+import { makeMessagesRepo } from './repos/messages.js';
+import { makeRunsRepo, makeRequestsRepo } from './repos/runs.js';
 
 const log = pino({ level: env.logLevel });
-const app = express();
-
-app.disable('x-powered-by');
-app.use((req, res, next) =>
-  req.path.endsWith('/documents') && req.method === 'POST'
-    ? next()
-    : express.json({ limit: '1mb' })(req, res, next)
-);
 
 mkdirSync(env.runsDir, { recursive: true });
 
-// ---------------------------------------------------------------- /health (implemented)
+const database = await db();
+const llm = makeAzureOpenAiLlm({
+  endpoint: env.azureOpenaiEndpoint,
+  apiKey: secrets.azureOpenai,
+  apiVersion: env.azureOpenaiApiVersion,
+  chatDeployment: env.azureChatDeployment || env.llmModel
+});
 
-app.get('/health', async (_req, res) => {
+const health = async (): Promise<HealthResponse> => {
   const dbStatus = await pingDb();
-  const body: HealthResponse = {
+  return {
     status: dbStatus === 'ok' ? 'ok' : 'degraded',
     model: env.llmModel,
     searchProvider: env.searchProvider,
@@ -67,26 +39,20 @@ app.get('/health', async (_req, res) => {
     db: dbStatus,
     ai: { status: 'ok' }
   };
-  res.status(dbStatus === 'ok' ? 200 : 503).json(body);
-});
-
-// ---------------------------------------------------------------- everything else: 501
-
-const notImplemented = (route: string) => (_req: express.Request, res: express.Response) => {
-  res.status(501).json({ error: `not implemented yet: ${route}. Build it in backend/agent/src/.`, status: 501 });
 };
 
-for (const route of ROUTES) {
-  if (route.path === '/health' || route.path === '/evals/report.json') continue;
-  const method = route.method.toLowerCase() as 'get' | 'post' | 'delete';
-  app[method](route.path, notImplemented(`${route.method} ${route.path}`));
-}
-
-app.use((req, res) => res.status(404).json({ error: `no route ${req.method} ${req.path}`, status: 404 }));
-
-app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  log.error({ err }, 'agent error');
-  res.status(502).json({ error: err.message, status: 502 });
+const app = makeAgentApp({
+  threads: makeThreadsRepo(database),
+  messages: makeMessagesRepo(database),
+  runAsk: makeRunAsk({
+    llm,
+    search: makeTavilySearch(secrets.tavily),
+    fetchPage: makeTavilyFetchPage(secrets.tavily),
+    messages: makeMessagesRepo(database),
+    runs: makeRunsRepo(database),
+    requests: makeRequestsRepo(database)
+  }),
+  health
 });
 
 app.listen(env.port, () => {
@@ -94,13 +60,14 @@ app.listen(env.port, () => {
     {
       port: env.port,
       model: env.llmModel,
+      llmProvider: env.llmProvider,
       searchProvider: env.searchProvider,
       vectorStore: env.vectorBackend,
       caps: {
-        quick: { toolCalls: env.maxToolCalls, wallClockSec: env.maxWallClockSec },
+        quick: { toolCalls: env.maxToolCalls, wallClockSec: env.maxWallClockSec, maxUsd: env.maxUsdQuick },
         deep: { toolCalls: env.maxToolCallsDeep, wallClockSec: env.maxWallClockSecDeep, dailyCap: env.deepDailyCap }
       }
     },
-    'agent up — every route but /health returns 501 until you build it'
+    'agent up — quick ask live; remaining routes 501 until built'
   );
 });
