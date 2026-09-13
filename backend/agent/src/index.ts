@@ -13,9 +13,11 @@ import { makeAgentApp } from './http/app.js';
 import { makeRunAsk } from './http/runAsk.js';
 import { makeAzureOpenAiLlm } from './providers/llm/azureOpenai.js';
 import { makeTavilySearch, makeTavilyFetchPage } from './providers/search/tavily.js';
+import { createSearchLru } from './providers/search/cached.js';
 import { makeThreadsRepo } from './repos/threads.js';
 import { makeMessagesRepo } from './repos/messages.js';
 import { makeRunsRepo, makeRequestsRepo } from './repos/runs.js';
+import { makeSearchCacheRepo } from './repos/searchCache.js';
 
 const log = pino({ level: env.logLevel });
 
@@ -47,6 +49,8 @@ const app = makeAgentApp({
   runAsk: makeRunAsk({
     llm,
     search: makeTavilySearch(secrets.tavily),
+    searchCache: makeSearchCacheRepo(database),
+    searchLru: createSearchLru(),
     fetchPage: makeTavilyFetchPage(secrets.tavily),
     messages: makeMessagesRepo(database),
     runs: makeRunsRepo(database),

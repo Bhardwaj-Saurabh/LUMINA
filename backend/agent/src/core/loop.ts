@@ -68,10 +68,20 @@ export interface RunLoopOutcome {
   terminated: Terminated;
 }
 
+/**
+ * Search wording is deliberate: the cache is keyed on the normalized query, so a model that
+ * rephrases the same question differently on every run never hits it (observed live —
+ * "Tavily search API" vs "Tavily search API official documentation" are two keys, two paid
+ * searches). Reusing the user's wording makes repeats cheap and fast.
+ */
 const SYSTEM_PROMPT =
   'You are LUMINA, a grounded answer engine. Research with the provided tools, then ' +
   'answer citing only sources retrieved in this request as [n]. If nothing was ' +
-  'retrieved, answer honestly without citations.';
+  'retrieved, answer honestly without citations.\n' +
+  "For web_search, use the user's own wording as the query unless it is genuinely " +
+  'ambiguous or too vague to search; do not embellish it with extra words like ' +
+  '"official documentation" or "explained". Never mix narration with a tool call: ' +
+  'either call tools, or write the final answer.';
 
 function errorText(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);

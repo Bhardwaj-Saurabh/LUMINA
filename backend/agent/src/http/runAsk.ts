@@ -17,6 +17,12 @@ import { createRunLog } from '../obs/runlog.js';
 import { vetUrl } from '../guards/ssrf.js';
 import type { LlmPort, LlmMessage } from '../providers/llm/port.js';
 import type { SearchPort, FetchPagePort } from '../providers/search/port.js';
+import {
+  makeCachedSearch,
+  type CachedSearchEntry,
+  type SearchCacheStore
+} from '../providers/search/cached.js';
+import type { Lru } from '../infra/lru.js';
 import type { RunAskInput } from './app.js';
 import type { MessagesWriter } from '../repos/messages.js';
 import { env } from '../env.js';
@@ -24,6 +30,9 @@ import { env } from '../env.js';
 export interface RunAskDeps {
   llm: LlmPort;
   search: SearchPort;
+  searchCache: SearchCacheStore;
+  /** Process-wide L1: scoping it per request would make the in-process tier useless. */
+  searchLru: Lru<CachedSearchEntry>;
   fetchPage: FetchPagePort;
   messages: MessagesWriter;
   runs: { upsert(doc: Record<string, unknown>): Promise<void> };
@@ -59,8 +68,17 @@ export function makeRunAsk(deps: RunAskDeps) {
       synthesisAllowance: { ms: env.synthesisAllowanceMs, usd: env.synthesisAllowanceUsd },
       now
     });
+    // Per-request cached port so stats (and therefore `searchCached`) describe this answer only.
+    const cachedSearch = makeCachedSearch({
+      inner: deps.search,
+      store: deps.searchCache,
+      ttlSeconds: env.searchCacheTtlSeconds,
+      provider: env.searchProvider,
+      lru: deps.searchLru,
+      now
+    });
     const registry = new ToolRegistry();
-    registry.register(makeWebSearchTool({ search: deps.search, collector }));
+    registry.register(makeWebSearchTool({ search: cachedSearch, collector }));
     registry.register(
       makeFetchPageTool({
         fetchPage: deps.fetchPage,
@@ -115,7 +133,7 @@ export function makeRunAsk(deps: RunAskDeps) {
       answerId,
       model: env.llmModel,
       price,
-      searchCached: () => false // accurate two-tier cache lands in M3
+      searchCached: () => cachedSearch.stats().allHits
     });
 
     // --- evidence + persistence: never claim more than what happened -------------------
