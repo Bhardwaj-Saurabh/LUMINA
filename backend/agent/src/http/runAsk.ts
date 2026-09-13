@@ -13,6 +13,7 @@ import { SourceCollector } from '../core/sourceCollector.js';
 import { ToolRegistry } from '../core/registry.js';
 import { runLoop, type AskEmitter } from '../core/loop.js';
 import { makeWebSearchTool, makeFetchPageTool } from '../core/tools/webTools.js';
+import { makeRecallMemoryTool, makeSaveMemoryTool } from '../core/tools/memoryTools.js';
 import { createRunLog } from '../obs/runlog.js';
 import { vetUrl } from '../guards/ssrf.js';
 import type { LlmPort, LlmMessage } from '../providers/llm/port.js';
@@ -25,6 +26,8 @@ import {
 import type { Lru } from '../infra/lru.js';
 import type { RunAskInput } from './app.js';
 import type { MessagesWriter } from '../repos/messages.js';
+import type { EmbeddingsPort } from '../providers/embeddings/port.js';
+import type { MemoriesRepo } from '../repos/memories.js';
 import { env } from '../env.js';
 
 export interface RunAskDeps {
@@ -34,6 +37,8 @@ export interface RunAskDeps {
   /** Process-wide L1: scoping it per request would make the in-process tier useless. */
   searchLru: Lru<CachedSearchEntry>;
   fetchPage: FetchPagePort;
+  embeddings: EmbeddingsPort;
+  memories: Pick<MemoriesRepo, 'insert' | 'searchByVector'>;
   messages: MessagesWriter;
   runs: { upsert(doc: Record<string, unknown>): Promise<void> };
   requests: { insert(doc: Record<string, unknown>): Promise<void> };
@@ -85,6 +90,19 @@ export function makeRunAsk(deps: RunAskDeps) {
         vet: (url) => vetUrl(url, resolveHost),
         collector
       })
+    );
+    // Memory is available in both gears; userId/threadId are request-scoped, never model input.
+    registry.register(
+      makeSaveMemoryTool({
+        embeddings: deps.embeddings,
+        memories: deps.memories,
+        userId,
+        threadId,
+        now
+      })
+    );
+    registry.register(
+      makeRecallMemoryTool({ embeddings: deps.embeddings, memories: deps.memories, userId })
     );
 
     const runlog = createRunLog({ depth: body.depth, now });

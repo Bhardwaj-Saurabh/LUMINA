@@ -302,6 +302,126 @@ export interface ScriptedFetchPagePort extends FetchPagePort {
   calls: string[];
 }
 
+// ---------------------------------------------------------------------------
+// EmbeddingsPort + memories-repo fakes (M5 long-term memory). No provider, no Mongo:
+// vectors are a deterministic function of the text, so two tests never disagree.
+// ---------------------------------------------------------------------------
+
+/** Neutral embeddings port: one batch in, one vector per input text out, order preserved. */
+export interface EmbeddingsPort {
+  embed(texts: string[]): Promise<number[][]>;
+}
+
+export interface ScriptedEmbeddingsPort extends EmbeddingsPort {
+  /** One entry per embed() call, holding the exact batch it was handed. */
+  calls: string[][];
+}
+
+/** Stable, collision-free-enough per-text fill value in (0, 1]; no randomness, no clock. */
+function textFill(text: string): number {
+  let hash = 7;
+  for (const ch of text) hash = (hash * 31 + ch.codePointAt(0)!) % 9973;
+  return (hash + 1) / 10000;
+}
+
+/** The vector `deterministicEmbeddings` produces for `text` — tests assert against this. */
+export function stubVector(text: string, dims: number): number[] {
+  return new Array<number>(dims).fill(textFill(text));
+}
+
+/**
+ * Embeds every text as `stubVector(text, dims)`. `failures` scripts throws: each entry is
+ * consumed per call, `null` meaning "succeed normally".
+ */
+export function deterministicEmbeddings(
+  dims: number,
+  failures: Array<Error | null> = []
+): ScriptedEmbeddingsPort {
+  const queue = [...failures];
+  const calls: string[][] = [];
+  return {
+    calls,
+    async embed(texts) {
+      calls.push([...texts]);
+      const next = queue.shift();
+      if (next instanceof Error) throw next;
+      return texts.map((t) => stubVector(t, dims));
+    }
+  };
+}
+
+/** A stored memory as the repo hands it back — the embedding is projected away. */
+export interface MemoryRow {
+  memoryId: string;
+  userId: string;
+  text: string;
+  createdAt: string;
+  sourceThread?: string;
+}
+
+/** One $vectorSearch hit. `score` is the index's similarity, carried for ranking only. */
+export interface MemoryMatch {
+  memoryId: string;
+  text: string;
+  score: number;
+}
+
+/** INVENTED repo surface (see the M5 test headers): Atlas `memories_vector`, userId-filtered. */
+export interface MemoriesRepo {
+  insert(doc: unknown): Promise<void>;
+  searchByVector(args: { userId: string; vector: number[]; limit: number }): Promise<MemoryMatch[]>;
+  list(userId: string): Promise<MemoryRow[]>;
+  delete(args: { userId: string; memoryId: string }): Promise<boolean>;
+}
+
+export interface RecordingMemoriesRepo extends MemoriesRepo {
+  rows: MemoryRow[];
+  inserted: unknown[];
+  searchCalls: Array<{ userId: string; vector: number[]; limit: number }>;
+  listCalls: string[];
+  deleteCalls: Array<{ userId: string; memoryId: string }>;
+}
+
+/**
+ * In-memory memories repo that enforces the same userId scoping Atlas will: every read and
+ * the delete filter on userId, so a test can prove the route never leaks across users.
+ */
+export function fakeMemoriesRepo(seed: MemoryRow[] = []): RecordingMemoriesRepo {
+  const rows = [...seed];
+  const inserted: unknown[] = [];
+  const searchCalls: Array<{ userId: string; vector: number[]; limit: number }> = [];
+  const listCalls: string[] = [];
+  const deleteCalls: Array<{ userId: string; memoryId: string }> = [];
+  return {
+    rows,
+    inserted,
+    searchCalls,
+    listCalls,
+    deleteCalls,
+    async insert(doc) {
+      inserted.push(doc);
+    },
+    async searchByVector(args) {
+      searchCalls.push({ ...args, vector: [...args.vector] });
+      return rows
+        .filter((r) => r.userId === args.userId)
+        .slice(0, args.limit)
+        .map((r, i) => ({ memoryId: r.memoryId, text: r.text, score: 1 - i / 100 }));
+    },
+    async list(userId) {
+      listCalls.push(userId);
+      return rows.filter((r) => r.userId === userId);
+    },
+    async delete(args) {
+      deleteCalls.push(args);
+      const idx = rows.findIndex((r) => r.memoryId === args.memoryId && r.userId === args.userId);
+      if (idx === -1) return false;
+      rows.splice(idx, 1);
+      return true;
+    }
+  };
+}
+
 /**
  * Scripted fetch_page backing. ARCHITECTURE.md folds extraction into the search provider
  * (tavily search + extract); green may merge this into SearchPort — the fake stands alone.

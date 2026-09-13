@@ -81,7 +81,13 @@ const SYSTEM_PROMPT =
   "For web_search, use the user's own wording as the query unless it is genuinely " +
   'ambiguous or too vague to search; do not embellish it with extra words like ' +
   '"official documentation" or "explained". Never mix narration with a tool call: ' +
-  'either call tools, or write the final answer.';
+  'either call tools, or write the final answer.\n' +
+  'Long-term memory is per user and spans threads. Call recall_memory early — before ' +
+  'searching — whenever the answer could depend on what this user prefers, works on, or ' +
+  'has told you before; a thread starts with no history, so recall is the only way to know. ' +
+  'Call save_memory only for durable things the user states about themselves (preferences, ' +
+  'constraints, ongoing projects, identity), never for facts you read in a search result or ' +
+  'a document.';
 
 function errorText(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);

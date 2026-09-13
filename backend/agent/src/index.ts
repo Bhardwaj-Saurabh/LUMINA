@@ -12,10 +12,12 @@ import { db, pingDb } from './db.js';
 import { makeAgentApp } from './http/app.js';
 import { makeRunAsk } from './http/runAsk.js';
 import { makeAzureOpenAiLlm } from './providers/llm/azureOpenai.js';
+import { makeAzureOpenAiEmbeddings } from './providers/embeddings/azureOpenai.js';
 import { makeTavilySearch, makeTavilyFetchPage } from './providers/search/tavily.js';
 import { createSearchLru } from './providers/search/cached.js';
 import { makeThreadsRepo } from './repos/threads.js';
 import { makeMessagesRepo } from './repos/messages.js';
+import { makeMemoriesRepo } from './repos/memories.js';
 import { makeRunsRepo, makeRequestsRepo } from './repos/runs.js';
 import { makeSearchCacheRepo } from './repos/searchCache.js';
 
@@ -30,6 +32,13 @@ const llm = makeAzureOpenAiLlm({
   apiVersion: env.azureOpenaiApiVersion,
   chatDeployment: env.azureChatDeployment || env.llmModel
 });
+const embeddings = makeAzureOpenAiEmbeddings({
+  endpoint: env.azureOpenaiEndpoint,
+  apiKey: secrets.azureOpenai,
+  apiVersion: env.azureOpenaiApiVersion,
+  deployment: env.azureEmbeddingDeployment || env.embeddingModel
+});
+const memories = makeMemoriesRepo(database);
 
 const health = async (): Promise<HealthResponse> => {
   const dbStatus = await pingDb();
@@ -46,8 +55,11 @@ const health = async (): Promise<HealthResponse> => {
 const app = makeAgentApp({
   threads: makeThreadsRepo(database),
   messages: makeMessagesRepo(database),
+  memories,
   runAsk: makeRunAsk({
     llm,
+    embeddings,
+    memories,
     search: makeTavilySearch(secrets.tavily),
     searchCache: makeSearchCacheRepo(database),
     searchLru: createSearchLru(),

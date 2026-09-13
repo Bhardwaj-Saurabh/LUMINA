@@ -15,10 +15,12 @@ import {
   type HealthResponse,
   type CreateThreadResponse,
   type GetThreadResponse,
+  type ListMemoryResponse,
   type ThreadMessage
 } from '@lumina/contract';
 import type { z } from 'zod';
 import type { AskEmitter } from '../core/loop.js';
+import type { MemoriesRepo } from '../repos/memories.js';
 import { createSseSink } from './sseSink.js';
 
 export interface ThreadRow {
@@ -49,6 +51,8 @@ export interface RunAskInput {
 export interface AgentAppDeps {
   threads: ThreadsRepo;
   messages: MessagesRepo;
+  /** Absent until wired: the memory routes stay 501 rather than pretending to be empty. */
+  memories?: Pick<MemoriesRepo, 'list' | 'delete'>;
   runAsk(input: RunAskInput): Promise<void>;
   health(): Promise<HealthResponse>;
 }
@@ -155,6 +159,34 @@ export function makeAgentApp(deps: AgentAppDeps): express.Express {
       }
     }
   };
+
+  const memories = deps.memories;
+  if (memories) {
+    handlers['GET /memory'] = async (_req, res) => {
+      const rows = await memories.list(userOf(res));
+      const body: ListMemoryResponse = {
+        memories: rows.map((r) => ({
+          id: r.memoryId,
+          text: r.text,
+          ...(r.sourceThread ? { sourceThread: r.sourceThread } : {}),
+          createdAt: r.createdAt
+        }))
+      };
+      res.status(200).json(body);
+    };
+
+    handlers['DELETE /memory/:memoryId'] = async (req, res) => {
+      const memoryId = req.params.memoryId!;
+      // Ownership lives in the repo filter; a foreign row is indistinguishable from an
+      // unknown one — 404, never 403 (same rule as threads).
+      const removed = await memories.delete({ userId: userOf(res), memoryId });
+      if (!removed) {
+        res.status(404).json(errorBody(404, `no memory ${memoryId}`));
+        return;
+      }
+      res.status(204).end();
+    };
+  }
 
   for (const route of ROUTES) {
     if (route.path === '/evals/report.json') continue; // published artifact, later milestone
