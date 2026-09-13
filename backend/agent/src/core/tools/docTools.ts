@@ -8,13 +8,13 @@
  */
 import { z } from 'zod';
 import type { RetrievedChunk } from '../rag/retrieve.js';
-import type { SourceCollector } from '../sourceCollector.js';
+import type { SourceSink } from '../sourceCollector.js';
 import type { ToolDef } from '../registry.js';
 
 export function makeSearchDocumentsTool(deps: {
   /** Takes the Space as an argument so the injected value is what reaches retrieval. */
   retrieve: (query: string, spaceId: string) => Promise<RetrievedChunk[]>;
-  collector: SourceCollector;
+  collector: SourceSink;
   /** Request scope; never taken from the model's arguments. */
   spaceId: string;
 }): ToolDef {

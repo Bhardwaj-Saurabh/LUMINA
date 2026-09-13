@@ -9,7 +9,7 @@
 
 | | |
 |---|---|
-| **Current milestone** | M8 deep search |
+| **Current milestone** | M9 full bench green |
 | **Blockers** | none. One open SLA item carried to M9: **ttft p95 3060 ms vs 2500 ms** — the only red line in an otherwise green smoke bench |
 | **Last gates run** | 2026-09-13 `bench --smoke` via :8787 **completed for the first time**: 4/4 contract probes ✓, 5/5 web answered 0 errors, 4/4 corpus files indexed (202 in 120–152 ms), recall@5 3/3, citation grounding 1.0 with 0 dangling, cost $0.0011/answer, sources-before-token ✓ — and ✗ ttft p95 3060 ms (gate 2500). Bench verdict: FAILED on that one target |
 | **Deploy state** | not deployed |
@@ -28,7 +28,7 @@ Legend: ☐ not started · 🔨 in progress · ✅ done (EDD proof recorded)
 | M5 | Memory: save/recall tools, `GET /memory`, `DELETE /memory/:id`, cross-thread effect | memory tool units w/ fake embeddings; route tests | 2026-09-13 live: thread A `save_memory` ✓ → `GET /memory` lists it → fresh thread B calls `recall_memory` FIRST and answers in the saved style → DELETE 204, re-DELETE 404, foreign 404, list empty. 29 unit tests | ✅ |
 | M6 | Gateway complete: auth 401, zod 400, rate limit 429, IAM-ready proxy, SSE pass-through, upload pipe, `/evals` SPA route | middleware units; askProxy stream test; 413 test | 2026-09-13: 39/39 gateway tests; live through :8787 — 401/400/404 probes correct, SSE streams trace→sources→token→done, one requestId greps both logs | ✅ (upload proxy deliberately 501 until M7) |
 | M7 | RAG: spaces, upload 202 <300 ms, jobs worker (lease+sweeper), pdfjs page-aware parse, chunk+locators, embed, hybrid RRF, read-your-write probe, `search_documents`, mode router | chunker/locator, RRF, jobState, ingest-pipeline, retrieve, docTools, spaces routes, upload route (98 tests) | 2026-09-13 `bench --smoke`: `accept202` 202 in 120–152 ms ✓ · `indexedViaWorker` 4/4 ✓ · `pageLocator` ✓ · `routerPicksDocs` ✓ (live: mode=auto reached for the Space) · recall@5 3/3 smoke, **39/39 = 1.000 over the full gold set** ✓ · grounding 1.0, 0 dangling | ✅ |
-| M8 | Deep search: plan-first, p-limit(3) fan-out, merge/renumber, subQuestion tags, DEEP_DAILY_CAP 429, quick-never-escalates | planner validation, merge dedupe/renumber, deepCap ledger units; deep orchestrator test w/ fake ports | bench caps `deepPlan`, `deepAttribution`, `deepReadsMore`, `deepBudget`, `deepCap429`, `quickNeverEscalates` | ☐ |
+| M8 | Deep search: plan-first, concurrency-3 fan-out, merge/renumber, subQuestion tags, DEEP_DAILY_CAP 429 + resetsAt, quick-never-escalates, `/stats` | planner validation, deepCap ledger, deep orchestrator w/ fake ports, deep+stats routes (41 tests) | 2026-09-13 live via :8787 — `deepPlan`: plan is frame 0, 6 sub-questions, plan in **1867 ms** (gate 4000) ✓ · `deepAttribution`: every retrieval step and all 22 sources tagged, numbering contiguous ✓ · `deepReadsMore`: 22 vs 5 distinct = **4.4x** (gate 2.0) ✓ · `deepBudget`: $0.0062 (gate 0.35), 7 steps (gate 24) ✓ · `deepCap429`: 6th deep → 429 with `resetsAt`, quick unaffected ✓ · `quickNeverEscalates`: no `plan_research` in any quick trace ✓ · `/stats` contract-valid | ✅ |
 | M9 | Full local proof: bench exit 0 vs sla.json; quality exit ≤ 1; failing trajectory in `runs/failing/`; `/stats` route; `sla.json` `cost_model` re-declared with real Azure rates. **Carries the one open SLA item: ttft p95** | regression tests for every gate failure found | `node benchmark/bench.mjs` exit 0 · `node quality/check.mjs .` exit ≤ 1 | ☐ |
 | M10 | Containerize (2 Dockerfiles), Cloud Run deploy (agent IAM-gated), Vercel UI, indexes on Atlas, deployed eval, report published, `/evals` renders | image smoke (USER node, ports, worker supervision) | `eval/eval.mjs --deploy-url` all gates; `/evals` on the Vercel URL renders the real report | ☐ |
 
@@ -54,6 +54,7 @@ Legend: ☐ not started · 🔨 in progress · ✅ done (EDD proof recorded)
 | 2026-09-13 | **M5 memory** (29 tests): `providers/embeddings/{port,azureOpenai}.ts` (always sends `dimensions: 1536` — the deployment is text-embedding-3-large, native 3072 — and sorts the batch by `index`, which the API does not guarantee), `core/tools/memoryTools.ts` (userId comes from request context, never model input — a hostile `{userId}` in tool args is stripped), `repos/memories.ts` ($vectorSearch with `filter:{userId}` INSIDE the stage; delete filters on owner so foreign reads as unknown), memory routes, and SYSTEM_PROMPT guidance so the model actually recalls in a fresh thread | 197 (156 agent + 41 gw) ✅ | live cross-thread recall ✓ · delete 204/404/404 ✓ · list empty after ✓ | M7 RAG: spaces, upload→202, jobs worker, pdfjs, chunking, hybrid RRF, read-your-write probe | Embeddings path now proven live, which de-risks M7's biggest unknown |
 | 2026-09-13 | **M7 RAG** (98 new tests, 302 total): `core/rag/{chunker,rrf,jobState,ingest,retrieve}.ts`, `core/tools/docTools.ts`, `repos/{spaces,documents,chunks,jobs}.ts`, `infra/gridfs.ts`, `providers/parse/pdf.ts`, `http/{uploadRoute,app}.ts` (multer→GridFS streaming storage engine), `worker.ts` + `workerSupervisor.ts` (child process, `--no-cpu-throttling` shape), mode router in `runAsk`. **bench --smoke completed for the first time** | 302 (258 agent + 44 gw) ✅ | smoke: accept202 ✓ · indexedViaWorker 4/4 ✓ · pageLocator ✓ · routerPicksDocs ✓ · recall@5 3/3 (39/39 full gold) · grounding 1.0 · **✗ ttft p95 3060 ms** | M8 deep search; ttft p95 to M9 | Three live-only bugs — see notes below |
 
+| 2026-09-13 | **M8 deep search** (44 new tests, 348 total): `core/deep/{planner,deepCap,orchestrator}.ts`, `repos/{deepUsage,stats}.ts`, deep admission + `GET /stats` in `http/app.ts`, both gears assembled in `runAsk` (deep gets its own envelope: 24 calls / 240 s / $0.35). `SourceSink` + `taggedSink` refactor so each sub-question's tools mint pre-attributed sources. Plan-prompt brevity pass: **plan 3376→1867 ms, cost/deep answer halved, end-to-end 22.6→11.4 s** | 348 (304 agent + 44 gw) ✅ | all six deep caps proven live (see M8 row) · quality exit 1 | M9: full bench exit 0; re-declare `sla.json` cost_model with real Azure rates; ttft p95 | Attribution is structural, not remembered; audit caught an all-branches-failed hole — see notes |
 ### M7 findings — three bugs only a live run could surface
 
 1. **The rate limit was throttling the grader, not an abuser.** 30/min flat was tighter than
@@ -79,3 +80,39 @@ Also: fixing (2) regressed M5 — the forced search satisfied the model and it s
 across threads, failing `memoryRecalled`. Caught by replaying the grader's exact memory
 scenario rather than trusting the unit tests, and fixed in the prompt (recall governs *how* to
 answer, so it belongs in the first turn alongside the search, not in a turn of its own).
+
+### M8 notes — what made deep search work
+
+**Attribution is structural, not remembered.** `deepAttribution` requires every retrieval step
+AND every source to carry its `subQuestion`. Rather than passing an index through every tool
+and hoping none forgets, each sub-question researches through its own registry built over a
+`taggedSink` — a view of the one shared `SourceCollector` that stamps the sub-question on
+everything minted through it. No tool knows sub-questions exist, and none can produce an
+untagged source. The shared collector is also what makes the merge free: dedupe by URL /
+docId+locator and contiguous numbering already lived there, so "merge the fan-out" is just
+"they all wrote to the same collector", and a source found by three sub-questions keeps the
+first one that found it.
+
+**The spend gate is an HTTP status, not a stream frame.** By the time the SSE sink exists the
+request has been accepted; a client that asked for a deep search would have to parse an error
+frame to learn it never got one. So admission happens in the route — after ownership, so
+probing someone else's thread cannot burn your allowance — and the ledger row is written at
+ADMISSION, not completion. Counting finished deep searches would let a user start `cap + 1`
+at once and discover the cap afterwards, which is the one moment it needed to work.
+
+**The audit caught a laundered exception.** One sub-question failing is an honest partial —
+the others finish and the answer is grounded in what did arrive. But if EVERY sub-question's
+provider turn threw (a correlated failure: an Azure 429, a network reset), the first cut
+emitted `sources: []`, let the model write its "nothing was retrieved" prose, and reported
+`terminated: "done"` with a 200 — a provider exception turned into a plausible answer, which
+is precisely rule A1's failure mode. Now an all-branches-failed fan-out is a 502 naming each
+sub-question's error, while a budget exhaustion stays an honest `cap`. Two related fixes came
+with it: a research turn that threw before any tool ran no longer fabricates a `web_search`
+entry in the graded run log, and a sub-question that retrieved nothing is named in the
+evidence digest so the answer discloses the gap instead of covering it from memory.
+
+**A prompt change bought more than any code change.** The planner was emitting paragraph-long
+sub-questions: 3376 ms to first paint against a 4000 ms gate, and poor search queries into the
+bargain. Asking for one short line each — phrased the way you would type it into a search box —
+took the plan to 1867 ms, halved the cost per deep answer, and halved end-to-end latency,
+because shorter sub-questions are also better queries.

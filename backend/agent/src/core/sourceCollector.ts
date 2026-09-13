@@ -13,6 +13,24 @@ export interface RegisterOpts {
   subQuestion?: number;
 }
 
+/**
+ * What a tool needs of the collector. Narrow on purpose: it lets a deep search hand each
+ * sub-question a sink that stamps its own attribution, so a tool cannot mint an untagged
+ * source even by forgetting to (see `taggedSink`).
+ */
+export interface SourceSink {
+  register(material: SourceMaterial, opts?: RegisterOpts): Source;
+}
+
+/**
+ * A view of one collector that tags everything minted through it with `subQuestion`.
+ * The deep orchestrator gives each sub-question its own, which is why attribution is
+ * structural there rather than something each tool has to remember.
+ */
+export function taggedSink(sink: SourceSink, subQuestion: number): SourceSink {
+  return { register: (material, opts = {}) => sink.register(material, { ...opts, subQuestion }) };
+}
+
 /** Strip fragment and utm_* tracking params; other query params stay significant. */
 function normalizeUrl(raw: string): string {
   const url = new URL(raw);

@@ -7,14 +7,14 @@
 import { z } from 'zod';
 import type { VettedUrl } from '../../guards/ssrf.js';
 import type { FetchPagePort, SearchPort } from '../../providers/search/port.js';
-import type { SourceCollector } from '../sourceCollector.js';
+import type { SourceSink } from '../sourceCollector.js';
 import type { ToolDef } from '../registry.js';
 
 const SNIPPET_CHARS = 300;
 
 export function makeWebSearchTool(deps: {
   search: SearchPort;
-  collector: SourceCollector;
+  collector: SourceSink;
 }): ToolDef {
   const schema = z.object({
     query: z.string().min(1),
@@ -53,7 +53,7 @@ export function makeWebSearchTool(deps: {
 export function makeFetchPageTool(deps: {
   fetchPage: FetchPagePort;
   vet: (url: string) => Promise<VettedUrl>;
-  collector: SourceCollector;
+  collector: SourceSink;
   maxChars?: number;
 }): ToolDef {
   const maxChars = deps.maxChars ?? 8000;

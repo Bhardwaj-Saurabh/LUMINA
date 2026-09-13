@@ -25,6 +25,9 @@ import { makeSpacesRepo } from './repos/spaces.js';
 import { makeDocumentsRepo } from './repos/documents.js';
 import { makeChunksRepo } from './repos/chunks.js';
 import { makeJobsRepo } from './repos/jobs.js';
+import { makeDeepUsageStore } from './repos/deepUsage.js';
+import { makeStatsReader } from './repos/stats.js';
+import { admitDeep } from './core/deep/deepCap.js';
 import { makeFileBucket } from './infra/gridfs.js';
 import { superviseWorker } from './workerSupervisor.js';
 
@@ -50,6 +53,7 @@ const spaces = makeSpacesRepo(database);
 const documents = makeDocumentsRepo(database);
 const chunks = makeChunksRepo(database);
 const files = makeFileBucket(database);
+const deepUsage = makeDeepUsageStore(database);
 
 const health = async (): Promise<HealthResponse> => {
   const dbStatus = await pingDb();
@@ -69,6 +73,11 @@ const app = makeAgentApp({
   memories,
   spaces,
   documents,
+  // The spend gate lives HERE, in the agent: a cap on the gateway is bypassed by anyone who
+  // can reach the agent directly, which is why the agent is IAM-gated in the deploy.
+  admitDeep: (userId) =>
+    admitDeep({ userId, now: Date.now(), cap: env.deepDailyCap, store: deepUsage }),
+  stats: makeStatsReader(database, { deepDailyCap: env.deepDailyCap, deepUsage }),
   uploadDocument: makeUploadDocumentHandler({
     spaces,
     documents,

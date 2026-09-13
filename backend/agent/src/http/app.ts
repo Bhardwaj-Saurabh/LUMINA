@@ -20,10 +20,12 @@ import {
   type ListDocumentsResponse,
   type ListMemoryResponse,
   type ListSpacesResponse,
+  type StatsResponse,
   type ThreadMessage
 } from '@lumina/contract';
 import type { z } from 'zod';
 import type { AskEmitter } from '../core/loop.js';
+import type { DeepAdmission } from '../core/deep/deepCap.js';
 import type { DocumentsRepo } from '../repos/documents.js';
 import type { MemoriesRepo } from '../repos/memories.js';
 import type { SpacesRepo } from '../repos/spaces.js';
@@ -66,6 +68,13 @@ export interface AgentAppDeps {
   uploadDocument?: express.RequestHandler;
   runAsk(input: RunAskInput): Promise<void>;
   health(): Promise<HealthResponse>;
+  /**
+   * The deep spend gate (SPEC 5.5). Absent ⇒ deep runs unrationed, which is the honest
+   * behaviour for a local dev process; in a deploy the composition root always wires it.
+   */
+  admitDeep?(userId: string): Promise<DeepAdmission>;
+  /** Absent until wired: `/stats` stays 501 rather than reporting zeroes that look real. */
+  stats?(userId: string): Promise<StatsResponse>;
 }
 
 type Handler = (req: express.Request, res: express.Response) => Promise<void>;
@@ -154,6 +163,19 @@ export function makeAgentApp(deps: AgentAppDeps): express.Express {
         res.status(404).json(errorBody(404, `no thread ${req.params.threadId}`));
         return;
       }
+      // The spend gate runs AFTER ownership (probing a foreign thread must not burn the
+      // prober's allowance) and BEFORE the sink: once the stream is open the request has
+      // been accepted, and a refusal could only arrive as an error frame nobody asked for.
+      if (parsed.data.depth === 'deep' && deps.admitDeep) {
+        const admission = await deps.admitDeep(userOf(res));
+        if (!admission.ok) {
+          res.status(429).json({
+            ...errorBody(429, `deep search daily cap reached (${admission.used} used)`),
+            resetsAt: admission.resetsAt
+          });
+          return;
+        }
+      }
       const sink = createSseSink(res);
       try {
         const inboundRequestId = req.header('x-request-id');
@@ -170,6 +192,13 @@ export function makeAgentApp(deps: AgentAppDeps): express.Express {
       }
     }
   };
+
+  const stats = deps.stats;
+  if (stats) {
+    handlers['GET /stats'] = async (_req, res) => {
+      res.status(200).json(await stats(userOf(res)));
+    };
+  }
 
   const memories = deps.memories;
   if (memories) {

@@ -1,17 +1,23 @@
 /**
- * runAsk — per-request assembly of the quick ask path (ARCHITECTURE §2.2 quick/orchestrator
- * plus persistence). Builds a fresh collector/budget/registry per request, runs the loop,
- * then persists: message pair, run log (file + runs collection), requests row. Deep search
- * lands in M8; until then a deep request is answered 501, honestly, before any spend.
+ * runAsk — per-request assembly of BOTH gears (ARCHITECTURE §2.2 orchestrator + persistence).
+ * Builds a fresh collector/budget/toolset per request, runs the quick loop or the deep
+ * orchestrator, then persists: message pair, run log (file + runs collection), requests row.
+ *
+ * The gears share everything except their envelope and their shape: quick is one loop over
+ * one registry, deep is plan → fan-out over one registry PER SUB-QUESTION → merge. The
+ * sub-question registries are built from the same tool factories over a `taggedSink`, which
+ * is why deep attribution needs no cooperation from the tools themselves.
  */
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { lookup } from 'node:dns/promises';
 import { newId, type SourcesEvent, type DoneEvent, type ThreadMessage } from '@lumina/contract';
 import { Budget } from '../core/budget.js';
-import { SourceCollector } from '../core/sourceCollector.js';
-import { ToolRegistry } from '../core/registry.js';
+import { SourceCollector, taggedSink, type SourceSink } from '../core/sourceCollector.js';
+import { ToolRegistry, type ToolDef } from '../core/registry.js';
 import { runLoop, type AskEmitter } from '../core/loop.js';
+import { runDeep } from '../core/deep/orchestrator.js';
+import { planResearch } from '../core/deep/planner.js';
 import { makeWebSearchTool, makeFetchPageTool } from '../core/tools/webTools.js';
 import { makeRecallMemoryTool, makeSaveMemoryTool } from '../core/tools/memoryTools.js';
 import { makeSearchDocumentsTool } from '../core/tools/docTools.js';
@@ -71,18 +77,15 @@ export function makeRunAsk(deps: RunAskDeps) {
     const { body, threadId, userId, emitter } = input;
     const requestId = input.requestId ?? newId('req');
 
-    if (body.depth === 'deep') {
-      emitter.error({ status: 501, error: 'deep search not implemented yet (M8)' });
-      return;
-    }
-
     const now = () => Date.now();
     const startedAt = now();
     const collector = new SourceCollector();
+    // Two gears, two envelopes — the caps are configuration, never a prompt instruction.
+    const deep = body.depth === 'deep';
     const budget = new Budget({
-      maxToolCalls: env.maxToolCalls,
-      deadlineMs: env.maxWallClockSec * 1000,
-      maxUsd: env.maxUsdQuick,
+      maxToolCalls: deep ? env.maxToolCallsDeep : env.maxToolCalls,
+      deadlineMs: (deep ? env.maxWallClockSecDeep : env.maxWallClockSec) * 1000,
+      maxUsd: deep ? env.maxUsdDeep : env.maxUsdQuick,
       maxTokens: env.maxTokensPerRun,
       synthesisAllowance: { ms: env.synthesisAllowanceMs, usd: env.synthesisAllowanceUsd },
       now
@@ -102,40 +105,52 @@ export function makeRunAsk(deps: RunAskDeps) {
     const spaceId = body.spaceId;
     const chunkSearch = deps.chunks;
 
-    const registry = new ToolRegistry();
-    if (body.mode !== 'docs') {
-      registry.register(makeWebSearchTool({ search: cachedSearch, collector }));
-      registry.register(
-        makeFetchPageTool({
-          fetchPage: deps.fetchPage,
-          vet: (url) => vetUrl(url, resolveHost),
-          collector
-        })
-      );
-    }
     const docsAvailable = body.mode !== 'web' && spaceId !== undefined && chunkSearch !== undefined;
-    if (docsAvailable) {
-      registry.register(
-        makeSearchDocumentsTool({
-          retrieve: (query, forSpace) =>
-            retrieveChunks(
-              { query, spaceId: forSpace, userId },
-              {
-                embeddings: deps.embeddings,
-                chunks: chunkSearch,
-                config: {
-                  topK: env.ragTopK,
-                  candidateK: env.ragCandidateK,
-                  numCandidates: env.ragNumCandidates,
-                  rrfK: env.ragRrfK
+
+    /**
+     * The retrieval half of the toolset, built against a given sink. Quick uses the
+     * collector directly; deep hands each sub-question a `taggedSink`, which is what makes
+     * every deep source carry its `subQuestion` without any tool knowing about sub-questions.
+     */
+    const retrievalTools = (sink: SourceSink): ToolDef[] => {
+      const tools: ToolDef[] = [];
+      if (body.mode !== 'docs') {
+        tools.push(makeWebSearchTool({ search: cachedSearch, collector: sink }));
+        tools.push(
+          makeFetchPageTool({
+            fetchPage: deps.fetchPage,
+            vet: (url) => vetUrl(url, resolveHost),
+            collector: sink
+          })
+        );
+      }
+      if (docsAvailable) {
+        tools.push(
+          makeSearchDocumentsTool({
+            retrieve: (query, forSpace) =>
+              retrieveChunks(
+                { query, spaceId: forSpace, userId },
+                {
+                  embeddings: deps.embeddings,
+                  chunks: chunkSearch,
+                  config: {
+                    topK: env.ragTopK,
+                    candidateK: env.ragCandidateK,
+                    numCandidates: env.ragNumCandidates,
+                    rrfK: env.ragRrfK
+                  }
                 }
-              }
-            ),
-          collector,
-          spaceId
-        })
-      );
-    }
+              ),
+            collector: sink,
+            spaceId
+          })
+        );
+      }
+      return tools;
+    };
+
+    const registry = new ToolRegistry();
+    for (const tool of retrievalTools(collector)) registry.register(tool);
     // Memory is available in both gears; userId/threadId are request-scoped, never model input.
     registry.register(
       makeSaveMemoryTool({
@@ -183,10 +198,8 @@ export function makeRunAsk(deps: RunAskDeps) {
       .map((m) => ({ role: m.role, content: m.content }));
 
     const answerId = newId('ans');
-    const outcome = await runLoop({
+    const common = {
       llm: deps.llm,
-      registry,
-      depth: body.depth,
       budget,
       collector,
       emitter: recording,
@@ -196,9 +209,37 @@ export function makeRunAsk(deps: RunAskDeps) {
       answerId,
       model: env.llmModel,
       price,
-      searchCached: () => cachedSearch.stats().allHits,
-      ...(docsAvailable ? { guidance: DOCS_GUIDANCE } : {})
-    });
+      searchCached: () => cachedSearch.stats().allHits
+    };
+
+    const outcome = deep
+      ? await runDeep({
+          ...common,
+          // Each sub-question gets its own registry over a sink that stamps its index, so a
+          // source cannot reach the merged list without the attribution the grader checks.
+          registryFor: (subQuestion) => {
+            const sub = new ToolRegistry();
+            for (const tool of retrievalTools(taggedSink(collector, subQuestion))) {
+              sub.register(tool);
+            }
+            return sub;
+          },
+          planner: (query) =>
+            planResearch(query, {
+              llm: deps.llm,
+              min: env.deepSubQuestionsMin,
+              max: env.deepSubQuestionsMax,
+              price,
+              budget
+            }),
+          concurrency: env.deepConcurrency
+        })
+      : await runLoop({
+          ...common,
+          registry,
+          depth: body.depth,
+          ...(docsAvailable ? { guidance: DOCS_GUIDANCE } : {})
+        });
 
     // --- evidence + persistence: never claim more than what happened -------------------
     const snapshot = budget.snapshot();
@@ -226,7 +267,11 @@ export function makeRunAsk(deps: RunAskDeps) {
       tokensOut: snapshot.tokens.out,
       costUsd: snapshot.costUsd,
       terminated: outcome.terminated,
-      depth: body.depth
+      depth: body.depth,
+      // Operational fields beyond the contract's declared minimum: /stats is computed from
+      // these rows, so the evidence a dashboard shows is the evidence the run logs carry.
+      ttftMs: doneEvent?.ttftMs ?? null,
+      searchCached: doneEvent?.searchCached ?? false
     });
 
     // §10: one line per answer, keyed by the same requestId the gateway logged, so a single
