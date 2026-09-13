@@ -19,22 +19,24 @@ import {
   type CollectingEmitter,
   type LlmMessage,
   type LlmUsage,
+  type RunTurnInput,
   type ScriptedLlm,
-  type ScriptedSynthesis,
-  type ScriptedTurn
+  type ScriptedTurn,
+  type TurnStream
 } from '../testing/fakes.js';
 
 /**
- * AgentLoop — ARCHITECTURE.md §3.1. Research (tool-use turns) → validated sources →
- * guarded streaming synthesis, with the REAL Budget and REAL SourceCollector (never mock
- * what we own); only the LlmPort and the tool executes are scripted fakes. Every emitted
- * frame is verified with the real contract schemas.
+ * AgentLoop — ARCHITECTURE.md §3.1. Optimistic streaming: research (tool-use turns) →
+ * validated sources → the answer, where the ANSWER IS A TURN, not a separate synthesis
+ * call. The REAL Budget and REAL SourceCollector are used (never mock what we own); only
+ * the LlmPort and the tool executes are scripted fakes. Every emitted frame is verified
+ * with the real contract schemas.
  *
  * Invented API pinned here (flagged for green — `runLoop`, a function, was chosen over an
  * AgentLoop class):
  *
  *   runLoop({
- *     llm,                 LlmPort (see src/testing/fakes.ts for the neutral shape)
+ *     llm,                 LlmPort + streamTurn (see src/testing/fakes.ts for the shape)
  *     registry,            the full ToolRegistry; the loop advertises registry.forDepth(depth)
  *                          and dispatches with ctx.depth so R2 holds at both ends
  *     depth,               'quick' | 'deep' — reported verbatim in done.depth
@@ -53,6 +55,17 @@ import {
  *   In-band failures (provider throw, dangling citation) RESOLVE with terminated:'error'
  *   after emitting the SSE error frame — the loop never throws for them; the HTTP route
  *   maps outcome to transport status.
+ *
+ * TTFT (measured 8.2 s against a 2.5 s SLA, 5.6 s of it LLM round trips): the loop must
+ * make ONE provider call per turn, including the turn that answers. The old shape ran a
+ * non-streaming turn to `end_turn`, threw that turn's generated text away, and paid for a
+ * second call to stream the same answer. `streamTurn` is that round trip removed:
+ *
+ *   - a turn that yields deltas before any tool call IS the answer → finalize the
+ *     collector, emit `sources` once, then stream every delta as a token frame;
+ *   - a turn that yields no deltas and resolves with toolCalls is research → dispatch, loop;
+ *   - tool calls arriving AFTER deltas began are ignored and recorded as a visible
+ *     trace with ok:false (fail-visible, never silent).
  */
 
 // ---------------------------------------------------------------------------
@@ -94,13 +107,12 @@ interface Harness {
 
 function harness(
   turns: ScriptedTurn[],
-  synthesis: ScriptedSynthesis,
   opts: { budgetOverrides?: Record<string, unknown>; registry?: (h: Omit<Harness, 'registry'>) => ToolRegistry } = {}
 ): Harness {
   const clock = fakeClock();
   const budget = quickBudget(clock, opts.budgetOverrides);
   const collector = new SourceCollector();
-  const llm = scriptedLlm(turns, synthesis);
+  const llm = scriptedLlm(turns);
   const emitter = collectingEmitter();
   const partial = { llm, budget, collector, emitter, clock };
   const registry = opts.registry ? opts.registry(partial) : defaultRegistry(collector);
@@ -166,10 +178,8 @@ function loopInput(h: Harness, overrides: Record<string, unknown> = {}) {
 
 const eventNames = (e: CollectingEmitter) => e.events.map((f) => f.event);
 const framesOf = (e: CollectingEmitter, name: string) => e.events.filter((f) => f.event === name);
-const answerText = (e: CollectingEmitter) =>
-  framesOf(e, 'token')
-    .map((f) => (f.data as { text: string }).text)
-    .join('');
+const tokenTexts = (e: CollectingEmitter) => framesOf(e, 'token').map((f) => (f.data as { text: string }).text);
+const answerText = (e: CollectingEmitter) => tokenTexts(e).join('');
 const parseAllFrames = (e: CollectingEmitter) => {
   for (const frame of e.events) AskStreamEvent.parse(frame);
 };
@@ -183,26 +193,21 @@ const toolResultMessages = (messages: LlmMessage[]) =>
 describe('runLoop happy path (quick)', () => {
   const turns: ScriptedTurn[] = [
     {
-      stopReason: 'tool_use',
       toolCalls: [{ id: 't1', name: 'web_search', input: { query: 'lumina', reason: 'find candidate pages' } }],
       usage: { in: 100, out: 20 }
     },
     {
-      stopReason: 'tool_use',
       toolCalls: [
         { id: 't2', name: 'fetch_page', input: { url: 'https://example.com/a', reason: 'read the top result in full' } }
       ],
       usage: { in: 120, out: 25 }
     },
-    { stopReason: 'end_turn', usage: { in: 50, out: 10 } }
+    // The turn that answers: deltas, no tool calls. This IS the synthesis — no second call.
+    { deltas: ['LUMINA is', ' an answer engine [1]', '.'], usage: { in: 200, out: 40 } }
   ];
-  const synthesis: ScriptedSynthesis = {
-    deltas: ['LUMINA is', ' an answer engine [1]', '.'],
-    usage: { in: 200, out: 40 }
-  };
 
   it('emits traces, then ONE sources event, then tokens, then done — in exactly that order', async () => {
-    const h = harness(turns, synthesis);
+    const h = harness(turns);
     await runLoop(loopInput(h));
 
     parseAllFrames(h.emitter);
@@ -217,9 +222,11 @@ describe('runLoop happy path (quick)', () => {
   });
 
   it('emits a contract-valid trace per tool call with step numbering, ok:true, ms, and the model-supplied reason', async () => {
-    const h = harness(turns, synthesis);
+    const h = harness(turns);
     await runLoop(loopInput(h));
 
+    // Two research turns + the answering turn — every one of them a streamTurn.
+    expect(h.llm.streamTurnCalls).toHaveLength(3);
     const traces = framesOf(h.emitter, 'trace').map((f) => TraceEvent.parse(f.data));
     expect(traces).toHaveLength(2);
 
@@ -240,9 +247,10 @@ describe('runLoop happy path (quick)', () => {
   });
 
   it('emits the REAL collector output as sources: deduped by URL, contiguous numbering from 1', async () => {
-    const h = harness(turns, synthesis);
+    const h = harness(turns);
     await runLoop(loopInput(h));
 
+    expect(h.llm.streamTurnCalls).toHaveLength(3);
     const sources = SourcesEvent.parse(framesOf(h.emitter, 'sources')[0]!.data);
     // web_search registered example.com/a; fetch_page registered the same URL → one source.
     expect(sources).toHaveLength(1);
@@ -250,7 +258,7 @@ describe('runLoop happy path (quick)', () => {
   });
 
   it('reports done with terminated done, quick depth, and token/cost totals reconciled from the real budget', async () => {
-    const h = harness(turns, synthesis);
+    const h = harness(turns);
     await runLoop(loopInput(h));
 
     const done = DoneEvent.parse(framesOf(h.emitter, 'done')[0]!.data);
@@ -258,9 +266,11 @@ describe('runLoop happy path (quick)', () => {
     expect(done.depth).toBe('quick');
     expect(done.answerId).toBe('ans_test1');
     expect(done.model).toBe('claude-sonnet-5');
-    // Every usage response reconciled: 3 research turns + synthesis.
-    expect(done.tokens).toEqual({ in: 470, out: 95 });
-    expect(done.costUsd).toBeCloseTo(PRICE({ in: 470, out: 95 }), 10);
+    // Every usage response reconciled: 2 research turns + the answering turn. Three calls,
+    // not four — the answering turn's text is streamed, not generated twice.
+    expect(h.llm.streamTurnCalls).toHaveLength(3);
+    expect(done.tokens).toEqual({ in: 420, out: 85 });
+    expect(done.costUsd).toBeCloseTo(PRICE({ in: 420, out: 85 }), 10);
     // The done frame is fed by the SAME Budget instance the test holds.
     expect(done.tokens).toEqual(h.budget.snapshot().tokens);
     expect(done.costUsd).toBeCloseTo(h.budget.snapshot().costUsd, 10);
@@ -273,20 +283,16 @@ describe('runLoop happy path (quick)', () => {
 
 describe('runLoop parallel tool calls in one turn', () => {
   it('executes both calls (both traces) and returns both results to the llm in ONE follow-up message', async () => {
-    const h = harness(
-      [
-        {
-          stopReason: 'tool_use',
-          toolCalls: [
-            { id: 't1', name: 'web_search', input: { query: 'lumina pricing', reason: 'first angle' } },
-            { id: 't2', name: 'web_search', input: { query: 'lumina reviews', reason: 'second angle' } }
-          ],
-          usage: { in: 100, out: 30 }
-        },
-        { stopReason: 'end_turn', usage: { in: 40, out: 10 } }
-      ],
+    const h = harness([
+      {
+        toolCalls: [
+          { id: 't1', name: 'web_search', input: { query: 'lumina pricing', reason: 'first angle' } },
+          { id: 't2', name: 'web_search', input: { query: 'lumina reviews', reason: 'second angle' } }
+        ],
+        usage: { in: 100, out: 30 }
+      },
       { deltas: ['Both angles agree [1][2].'], usage: { in: 90, out: 15 } }
-    );
+    ]);
     await runLoop(loopInput(h));
 
     parseAllFrames(h.emitter);
@@ -297,9 +303,9 @@ describe('runLoop parallel tool calls in one turn', () => {
     expect(SourcesEvent.parse(framesOf(h.emitter, 'sources')[0]!.data)).toHaveLength(2);
 
     // The llm's second turn received EXACTLY ONE new tool_results message holding both results.
-    expect(h.llm.runTurnCalls).toHaveLength(2);
-    expect(toolResultMessages(h.llm.runTurnCalls[0]!.messages)).toHaveLength(0);
-    const followUps = toolResultMessages(h.llm.runTurnCalls[1]!.messages);
+    expect(h.llm.streamTurnCalls).toHaveLength(2);
+    expect(toolResultMessages(h.llm.streamTurnCalls[0]!.messages)).toHaveLength(0);
+    const followUps = toolResultMessages(h.llm.streamTurnCalls[1]!.messages);
     expect(followUps).toHaveLength(1);
     expect(followUps[0]!.results.map((r) => r.toolCallId).sort()).toEqual(['t1', 't2']);
     expect(followUps[0]!.results.every((r) => r.ok)).toBe(true);
@@ -315,13 +321,11 @@ describe('runLoop failed tool call', () => {
     const h = harness(
       [
         {
-          stopReason: 'tool_use',
           toolCalls: [{ id: 't1', name: 'web_search', input: { query: 'lumina', reason: 'try the web' } }],
           usage: { in: 80, out: 20 }
         },
-        { stopReason: 'end_turn', usage: { in: 40, out: 10 } }
+        { deltas: ['I could not retrieve evidence for this.'], usage: { in: 60, out: 12 } }
       ],
-      { deltas: ['I could not retrieve evidence for this.'], usage: { in: 60, out: 12 } },
       {
         registry: ({ collector }) => {
           void collector;
@@ -347,8 +351,8 @@ describe('runLoop failed tool call', () => {
     expect(trace.error).toContain('search backend down');
 
     // Recoverable: the loop went back to the model instead of dying.
-    expect(h.llm.runTurnCalls).toHaveLength(2);
-    const followUps = toolResultMessages(h.llm.runTurnCalls[1]!.messages);
+    expect(h.llm.streamTurnCalls).toHaveLength(2);
+    const followUps = toolResultMessages(h.llm.streamTurnCalls[1]!.messages);
     expect(followUps).toHaveLength(1);
     expect(followUps[0]!.results[0]).toMatchObject({ toolCallId: 't1', ok: false });
     expect(followUps[0]!.results[0]!.content).toContain('search backend down');
@@ -366,7 +370,7 @@ describe('runLoop failed tool call', () => {
 
 describe('runLoop provider failure', () => {
   it('emits a 502 error frame, never done, makes no further llm calls, and reports terminated error', async () => {
-    const h = harness([{ throws: new Error('provider melted: 500') }], { deltas: ['never streamed'] });
+    const h = harness([{ throws: new Error('provider melted: 500') }]);
     const outcome = await runLoop(loopInput(h));
 
     // The first and only frame is the terminal error — no done, ever.
@@ -375,8 +379,7 @@ describe('runLoop provider failure', () => {
     expect(err.status).toBe(502);
     expect(err.error.length).toBeGreaterThan(0);
 
-    expect(h.llm.runTurnCalls).toHaveLength(1);
-    expect(h.llm.streamTextCalls).toHaveLength(0);
+    expect(h.llm.streamTurnCalls).toHaveLength(1);
     expect(outcome.terminated).toBe('error');
   });
 });
@@ -386,25 +389,24 @@ describe('runLoop provider failure', () => {
 // ---------------------------------------------------------------------------
 
 describe('runLoop cap on refused admission', () => {
-  it('stops research when the budget refuses the reservation, synthesizes an honest partial, and reports terminated cap — never done', async () => {
+  it('stops research when the budget refuses the reservation, streams an honest partial from a tool-free finish turn, and reports terminated cap — never done', async () => {
     let fetchExecuted = false;
     const h = harness(
       [
         {
-          stopReason: 'tool_use',
           toolCalls: [{ id: 't1', name: 'web_search', input: { query: 'lumina', reason: 'first search' } }],
           usage: { in: 100, out: 20 }
         },
         {
           // The model still wants more research; the budget must refuse this one.
-          stopReason: 'tool_use',
           toolCalls: [
             { id: 't2', name: 'fetch_page', input: { url: 'https://example.com/a', reason: 'read it in full' } }
           ],
           usage: { in: 90, out: 18 }
-        }
+        },
+        // The capped finish: one more turn, offered no tools, so it can only answer.
+        { deltas: ['Partial: only the initial search evidence [1].'], usage: { in: 70, out: 14 } }
       ],
-      { deltas: ['Partial: only the initial search evidence [1].'], usage: { in: 70, out: 14 } },
       {
         budgetOverrides: { maxToolCalls: 1 },
         registry: ({ collector }) => {
@@ -452,37 +454,42 @@ describe('runLoop cap on refused admission', () => {
     const done = DoneEvent.parse(framesOf(h.emitter, 'done')[0]!.data);
     expect(done.terminated).toBe('cap');
     expect(outcome.terminated).toBe('cap');
+
+    // The finish turn advertises NO tools: once capped, a tool the budget cannot admit
+    // must not even be offered (otherwise the loop can only refuse it again).
+    expect(h.llm.streamTurnCalls).toHaveLength(3);
+    expect(h.llm.streamTurnCalls[2]!.tools).toEqual([]);
   });
 });
 
 // ---------------------------------------------------------------------------
-// f. natural exhaustion after end_turn is NOT a cap (A2 honesty distinction)
+// f. natural exhaustion after an answering turn is NOT a cap (A2 honesty distinction)
 // ---------------------------------------------------------------------------
 
 describe('runLoop natural exhaustion', () => {
-  it('reports terminated done when the model uses exactly the call cap and then ends its turn on its own', async () => {
+  it('reports terminated done when the model uses exactly the call cap and then answers on its own', async () => {
     const h = harness(
       [
         {
-          stopReason: 'tool_use',
           toolCalls: [{ id: 't1', name: 'web_search', input: { query: 'lumina', reason: 'search first' } }],
           usage: { in: 100, out: 20 }
         },
         {
-          stopReason: 'tool_use',
           toolCalls: [
             { id: 't2', name: 'fetch_page', input: { url: 'https://example.com/a', reason: 'then read the page' } }
           ],
           usage: { in: 90, out: 18 }
         },
-        { stopReason: 'end_turn', usage: { in: 40, out: 8 } }
+        { deltas: ['A complete answer [1].'], usage: { in: 40, out: 8 } }
       ],
-      { deltas: ['A complete answer [1].'], usage: { in: 70, out: 14 } },
       { budgetOverrides: { maxToolCalls: 2 } }
     );
     const outcome = await runLoop(loopInput(h));
 
     parseAllFrames(h.emitter);
+    // Two research turns and the answer the model volunteered — no forced finish turn.
+    expect(h.llm.streamTurnCalls).toHaveLength(3);
+    expect(answerText(h.emitter)).toBe('A complete answer [1].');
     // The budget IS exhausted on the toolCalls dimension…
     expect(h.budget.exceededReason()).toBe('toolCalls');
     // …but the model finished naturally, so this is done, not cap (budget.ts's recorded rule).
@@ -497,19 +504,15 @@ describe('runLoop natural exhaustion', () => {
 // ---------------------------------------------------------------------------
 
 describe('runLoop dangling citation', () => {
-  it('terminates with an error frame and no done when the synthesis cites [2] but only source 1 exists', async () => {
+  it('terminates with an error frame and no done when the answer cites [2] but only source 1 exists', async () => {
     const fullText = 'Claims rest on [1] and on [2].';
-    const h = harness(
-      [
-        {
-          stopReason: 'tool_use',
-          toolCalls: [{ id: 't1', name: 'web_search', input: { query: 'lumina', reason: 'the only retrieval' } }],
-          usage: { in: 100, out: 20 }
-        },
-        { stopReason: 'end_turn', usage: { in: 40, out: 8 } }
-      ],
+    const h = harness([
+      {
+        toolCalls: [{ id: 't1', name: 'web_search', input: { query: 'lumina', reason: 'the only retrieval' } }],
+        usage: { in: 100, out: 20 }
+      },
       { deltas: ['Claims rest on [1]', ' and on [2].'], usage: { in: 70, out: 14 } }
-    );
+    ]);
     const outcome = await runLoop(loopInput(h));
 
     // The emitted sources are what the contract's own helper judges the text against.
@@ -533,10 +536,9 @@ describe('runLoop dangling citation', () => {
 
 describe('runLoop empty retrieval', () => {
   it('emits an empty sources event before any token and finishes as done when the model calls no tools', async () => {
-    const h = harness(
-      [{ stopReason: 'end_turn', usage: { in: 60, out: 12 } }],
+    const h = harness([
       { deltas: ['I found nothing to cite; answering from general knowledge, uncited.'], usage: { in: 50, out: 10 } }
-    );
+    ]);
     const outcome = await runLoop(loopInput(h));
 
     parseAllFrames(h.emitter);
@@ -560,16 +562,32 @@ describe('runLoop empty retrieval', () => {
 
 describe('runLoop deadline signal', () => {
   it('aborts a hung research turn at the deadline and finishes as an honest cap, never error', async () => {
-    const h = harness([], {
-      deltas: ['Cut short by the time budget: partial answer from evidence gathered so far.'],
-      usage: { in: 10, out: 5 }
-    });
+    const h = harness([
+      {
+        deltas: ['Cut short by the time budget: partial answer from evidence gathered so far.'],
+        usage: { in: 10, out: 5 }
+      }
+    ]);
     let captured: AbortController | undefined;
+    let calls = 0;
     const hangingLlm = {
-      runTurn: (input: { signal?: AbortSignal }) =>
-        new Promise<never>((_, reject) => {
+      streamTurn: (input: RunTurnInput): TurnStream => {
+        calls += 1;
+        // Only the first (research) turn hangs; the capped finish turn is scripted.
+        if (calls > 1) return h.llm.streamTurn(input);
+        const hung = new Promise<never>((_, reject) => {
           input.signal?.addEventListener('abort', () => reject(new Error('request aborted')));
-        }),
+        });
+        hung.catch(() => undefined); // the loop attaches the real handler; keep node quiet
+        return {
+          // eslint-disable-next-line require-yield
+          stream: (async function* (): AsyncGenerator<string> {
+            await hung;
+          })(),
+          result: () => hung
+        };
+      },
+      runTurn: h.llm.runTurn.bind(h.llm),
       streamText: h.llm.streamText.bind(h.llm)
     };
     const makeSignal = (_ms: number) => {
@@ -591,5 +609,176 @@ describe('runLoop deadline signal', () => {
     const done = DoneEvent.parse(framesOf(h.emitter, 'done')[0]!.data);
     expect(done.terminated).toBe('cap');
     expect(answerText(h.emitter).length).toBeGreaterThan(0); // honest partial, visibly there
+  });
+});
+
+// ---------------------------------------------------------------------------
+// j. OPTIMISTIC STREAMING — a research turn produces no visible answer yet
+// ---------------------------------------------------------------------------
+
+describe('runLoop research turn', () => {
+  it('emits no token frames and has not emitted sources while a research turn is still dispatching tools', async () => {
+    let seenAtDispatch: string[] = [];
+    const h = harness(
+      [
+        {
+          toolCalls: [{ id: 't1', name: 'web_search', input: { query: 'lumina', reason: 'the only retrieval' } }],
+          usage: { in: 100, out: 20 }
+        },
+        { deltas: ['LUMINA is an answer engine [1].'], usage: { in: 80, out: 16 } }
+      ],
+      {
+        registry: ({ collector, emitter }) => {
+          const registry = new ToolRegistry();
+          registry.register({
+            name: 'web_search',
+            description: 'search',
+            schema: z.object({ query: z.string(), reason: z.string() }),
+            execute: async () => {
+              // The grounding boundary has NOT been crossed yet: no sources, no tokens.
+              seenAtDispatch = emitter.events.map((f) => f.event);
+              collector.register({
+                kind: 'web',
+                url: 'https://example.com/a',
+                title: 'Example A',
+                snippet: 'a passage the claim rests on'
+              });
+              return [{ url: 'https://example.com/a' }];
+            }
+          });
+          return registry;
+        }
+      }
+    );
+    await runLoop(loopInput(h));
+
+    parseAllFrames(h.emitter);
+    expect(seenAtDispatch).not.toContain('sources');
+    expect(seenAtDispatch).not.toContain('token');
+    // The research turn contributed no answer text; only the answering turn's delta did.
+    expect(tokenTexts(h.emitter)).toEqual(['LUMINA is an answer engine [1].']);
+    expect(eventNames(h.emitter)).toEqual(['trace', 'sources', 'token', 'done']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// k. OPTIMISTIC STREAMING — the answering turn is the answer, streamed verbatim
+// ---------------------------------------------------------------------------
+
+describe('runLoop answering turn', () => {
+  const turns: ScriptedTurn[] = [
+    {
+      toolCalls: [{ id: 't1', name: 'web_search', input: { query: 'lumina', reason: 'the only retrieval' } }],
+      usage: { in: 100, out: 20 }
+    },
+    { deltas: ['LUMINA is', ' an answer engine [1]', ' for the web.'], usage: { in: 80, out: 16 } }
+  ];
+
+  it('emits sources exactly once immediately before the first token, and one token per delta in order', async () => {
+    const h = harness(turns);
+    await runLoop(loopInput(h));
+
+    parseAllFrames(h.emitter);
+    const names = eventNames(h.emitter);
+    expect(names.filter((n) => n === 'sources')).toHaveLength(1);
+    const sourcesAt = names.indexOf('sources');
+    const firstTokenAt = names.indexOf('token');
+    expect(firstTokenAt).toBeGreaterThan(-1);
+    expect(sourcesAt).toBe(firstTokenAt - 1);
+    // The first delta is buffered while the decision is made, then emitted — never dropped,
+    // never merged with the next one.
+    expect(tokenTexts(h.emitter)).toEqual(['LUMINA is', ' an answer engine [1]', ' for the web.']);
+  });
+
+  it('spends exactly ONE llm call on the turn that answers — no separate synthesis round trip', async () => {
+    const h = harness(turns);
+    await runLoop(loopInput(h));
+
+    // One search + one answer = two provider calls. The old shape cost four: a
+    // non-streaming end_turn whose generated text was billed and thrown away, then a
+    // streamText that regenerated it.
+    expect(h.llm.streamTurnCalls).toHaveLength(2);
+    expect(h.llm.streamTextCalls).toHaveLength(0);
+    expect(h.llm.runTurnCalls).toHaveLength(0);
+    expect(DoneEvent.parse(framesOf(h.emitter, 'done')[0]!.data).terminated).toBe('done');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// l. OPTIMISTIC STREAMING — a turn that mixes narration with a tool call
+// ---------------------------------------------------------------------------
+
+describe('runLoop mixed narration and tool call', () => {
+  it('ignores a tool call that arrives after the answer began, records it as a visible ok:false trace, and still finishes done', async () => {
+    let fetchExecuted = false;
+    const h = harness(
+      [
+        {
+          toolCalls: [{ id: 't1', name: 'web_search', input: { query: 'lumina', reason: 'the only retrieval' } }],
+          usage: { in: 100, out: 20 }
+        },
+        {
+          // The model narrated AND asked for another tool in the same turn. The deltas
+          // stream first; the tool call is only visible once the turn resolves — by which
+          // time sources are frozen and tokens are on the wire.
+          deltas: ['LUMINA is an answer engine [1].'],
+          toolCalls: [
+            { id: 't2', name: 'fetch_page', input: { url: 'https://example.com/a', reason: 'read it in full' } }
+          ],
+          usage: { in: 80, out: 16 }
+        }
+      ],
+      {
+        registry: ({ collector }) => {
+          const registry = new ToolRegistry();
+          registry.register({
+            name: 'web_search',
+            description: 'search',
+            schema: z.object({ query: z.string(), reason: z.string() }),
+            execute: async () => {
+              collector.register({
+                kind: 'web',
+                url: 'https://example.com/a',
+                title: 'Example A',
+                snippet: 'a passage the claim rests on'
+              });
+              return [{ url: 'https://example.com/a' }];
+            }
+          });
+          registry.register({
+            name: 'fetch_page',
+            description: 'fetch',
+            schema: z.object({ url: z.string(), reason: z.string() }),
+            execute: async () => {
+              fetchExecuted = true;
+              return { text: 'should never run' };
+            }
+          });
+          return registry;
+        }
+      }
+    );
+    const outcome = await runLoop(loopInput(h));
+
+    parseAllFrames(h.emitter);
+    // The post-answer tool call is dropped — the answer already rests on frozen sources.
+    expect(fetchExecuted).toBe(false);
+    // …but never silently: A1 says the drop is visible as a failure, with a reason.
+    const traces = framesOf(h.emitter, 'trace').map((f) => TraceEvent.parse(f.data));
+    expect(traces).toHaveLength(2);
+    expect(traces[0]).toMatchObject({ step: 1, tool: 'web_search', ok: true });
+    expect(traces[1]!.tool).toBe('fetch_page');
+    expect(traces[1]!.ok).toBe(false);
+    expect(traces[1]!.step).toBe(2);
+    expect((traces[1]!.error ?? '').trim().length).toBeGreaterThan(0);
+
+    // The answer itself still completes, over the sources it was actually grounded in.
+    expect(answerText(h.emitter)).toBe('LUMINA is an answer engine [1].');
+    expect(SourcesEvent.parse(framesOf(h.emitter, 'sources')[0]!.data)).toHaveLength(1);
+    const done = DoneEvent.parse(framesOf(h.emitter, 'done')[0]!.data);
+    expect(done.terminated).toBe('done');
+    expect(outcome.terminated).toBe('done');
+    // No extra turn was requested after the answer.
+    expect(h.llm.streamTurnCalls).toHaveLength(2);
   });
 });

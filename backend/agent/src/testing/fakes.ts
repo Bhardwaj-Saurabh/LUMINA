@@ -23,10 +23,11 @@ import type {
   TraceEvent
 } from '@lumina/contract';
 import type {
+  LlmMessage,
   LlmPort,
   LlmUsage,
   RunTurnInput,
-  StreamTextInput,
+  RunTurnResult,
   ToolCallRequest
 } from '../providers/llm/port.js';
 
@@ -37,11 +38,26 @@ export type {
   LlmUsage,
   RunTurnInput,
   RunTurnResult,
-  StreamTextInput,
-  TextStream,
   ToolCallRequest,
   ToolResultPart
 } from '../providers/llm/port.js';
+
+/**
+ * Legacy one-shot synthesis shapes, declared locally (structurally identical to the ones
+ * in port.ts) rather than imported: once the loop answers inside `streamTurn`, nothing
+ * needs `streamText`, and green should be free to delete it from the port and the Azure
+ * adapter without breaking the fakes.
+ */
+export interface StreamTextInput {
+  system: string;
+  messages: LlmMessage[];
+  signal?: AbortSignal;
+}
+
+export interface TextStream {
+  stream: AsyncIterable<string>;
+  usage(): Promise<LlmUsage>;
+}
 
 // ---------------------------------------------------------------------------
 // AskEmitter — ARCHITECTURE.md §3.1 "SSE decoupling": the loop receives this
@@ -96,24 +112,50 @@ export function collectingEmitter(): CollectingEmitter {
 // LlmPort — neutral turn-based shape, homed in providers/llm/port.ts and
 // re-exported above (see file header for the provider mapping).
 // ---------------------------------------------------------------------------
-// scriptedLlm — a queue of scripted turn results plus a scripted synthesis stream.
+// scriptedLlm — a queue of scripted turns, consumed by `streamTurn` (the shape the
+// optimistic-streaming loop uses for research AND synthesis in ONE round trip) and by
+// the legacy non-streaming `runTurn` / `streamText` alike.
 // ---------------------------------------------------------------------------
 
+/**
+ * ONE turn, streamed. Homed in `providers/llm/port.ts` next to `RunTurnResult`:
+ *
+ *   stream    assistant text deltas, IF this turn answers rather than calling tools.
+ *             A research turn yields nothing.
+ *   result()  the completed turn: toolCalls (possibly empty), stopReason, usage.
+ *             Resolves only once the stream is drained — a real provider sends
+ *             stop_reason/usage last, so the loop must iterate before it can decide.
+ */
+export type { TurnStream } from '../providers/llm/port.js';
+
+/** `LlmPort` gains `streamTurn` (and keeps `runTurn`); kept as a name the tests can use. */
+export type StreamingLlmPort = Pick<LlmPort, 'streamTurn'>;
+
+/**
+ * A scripted turn. `deltas` present ⇒ the turn ANSWERS; `toolCalls` present ⇒ it
+ * RESEARCHES; both present ⇒ the model illegally mixed narration with tool calls (the
+ * deltas stream first, the tool calls arrive with the result). `stopReason` is derived
+ * from `toolCalls` unless stated.
+ */
 export type ScriptedTurn =
   | {
+      deltas?: string[];
       toolCalls?: ToolCallRequest[];
       text?: string;
-      stopReason: 'tool_use' | 'end_turn';
+      stopReason?: 'tool_use' | 'end_turn';
       usage?: LlmUsage;
     }
   | { throws: Error };
 
 export type ScriptedSynthesis = { deltas: string[]; usage?: LlmUsage } | { throws: Error };
 
-export interface ScriptedLlm extends LlmPort {
-  /** Snapshot of every runTurn input, so tests can pin exactly what the model was shown. */
+export interface ScriptedLlm extends LlmPort, StreamingLlmPort {
+  /** Snapshot of every streamTurn input, so tests can pin exactly what the model was shown. */
+  streamTurnCalls: RunTurnInput[];
   runTurnCalls: RunTurnInput[];
   streamTextCalls: StreamTextInput[];
+  /** Legacy one-shot synthesis, kept on the fake alone: the port no longer carries it. */
+  streamText(input: StreamTextInput): TextStream;
 }
 
 const ZERO_USAGE: LlmUsage = { in: 0, out: 0 };
@@ -123,24 +165,71 @@ export function scriptedLlm(
   synthesis: ScriptedSynthesis = { deltas: [] }
 ): ScriptedLlm {
   const queue = [...turns];
+  const streamTurnCalls: RunTurnInput[] = [];
   const runTurnCalls: RunTurnInput[] = [];
   const streamTextCalls: StreamTextInput[] = [];
+
+  // Shallow-copy the arrays: the loop reuses/mutates its own message array later, and
+  // assertions need what the model saw AT THIS CALL.
+  const snapshot = (input: RunTurnInput): RunTurnInput => ({
+    system: input.system,
+    messages: [...input.messages],
+    tools: [...input.tools]
+  });
+
+  const resultOf = (turn: Exclude<ScriptedTurn, { throws: Error }>): RunTurnResult => {
+    const toolCalls = turn.toolCalls ?? [];
+    const text = turn.text ?? (turn.deltas ? turn.deltas.join('') : undefined);
+    return {
+      toolCalls,
+      ...(text !== undefined ? { text } : {}),
+      stopReason: turn.stopReason ?? (toolCalls.length > 0 ? 'tool_use' : 'end_turn'),
+      usage: turn.usage ?? ZERO_USAGE
+    };
+  };
+
   return {
+    streamTurnCalls,
     runTurnCalls,
     streamTextCalls,
+    streamTurn(input) {
+      streamTurnCalls.push(snapshot(input));
+      const turn = queue.shift();
+      if (!turn) throw new Error('scriptedLlm: streamTurn called more times than scripted');
+      if ('throws' in turn) {
+        const err = turn.throws;
+        return {
+          // eslint-disable-next-line require-yield
+          stream: (async function* (): AsyncGenerator<string> {
+            throw err;
+          })(),
+          result: () => Promise.reject(err)
+        };
+      }
+      let done!: () => void;
+      const drained = new Promise<void>((resolve) => {
+        done = resolve;
+      });
+      return {
+        stream: (async function* () {
+          try {
+            for (const delta of turn.deltas ?? []) yield delta;
+          } finally {
+            done();
+          }
+        })(),
+        result: async () => {
+          await drained;
+          return resultOf(turn);
+        }
+      };
+    },
     async runTurn(input) {
-      // Shallow-copy the arrays: the loop may reuse/mutate its own message array later,
-      // and assertions need what the model saw AT THIS CALL.
-      runTurnCalls.push({ system: input.system, messages: [...input.messages], tools: [...input.tools] });
+      runTurnCalls.push(snapshot(input));
       const turn = queue.shift();
       if (!turn) throw new Error('scriptedLlm: runTurn called more times than scripted');
       if ('throws' in turn) throw turn.throws;
-      return {
-        toolCalls: turn.toolCalls ?? [],
-        ...(turn.text !== undefined ? { text: turn.text } : {}),
-        stopReason: turn.stopReason,
-        usage: turn.usage ?? ZERO_USAGE
-      };
+      return resultOf(turn);
     },
     streamText(input) {
       streamTextCalls.push({ system: input.system, messages: [...input.messages] });

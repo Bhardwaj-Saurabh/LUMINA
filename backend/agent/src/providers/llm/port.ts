@@ -58,23 +58,22 @@ export interface RunTurnResult {
   usage: LlmUsage;
 }
 
-export interface StreamTextInput {
-  system: string;
-  messages: LlmMessage[];
-  signal?: AbortSignal;
-}
-
 /**
- * Chosen streaming shape: `streamText` returns synchronously with a lazy delta stream plus
- * `usage()` resolving after the stream is drained. A real adapter opens the connection on
- * first iteration; open-failure surfaces as a throw from the iterator.
+ * ONE turn, streamed: assistant text deltas as they arrive, plus the completed turn.
+ *
+ *   stream    the turn's text deltas, IF it answers rather than calling tools.
+ *             A research turn yields nothing.
+ *   result()  Resolves only after the stream is drained — a real provider sends
+ *             stop_reason/usage last, so the loop must iterate before it can decide.
  */
-export interface TextStream {
+export interface TurnStream {
   stream: AsyncIterable<string>;
-  usage(): Promise<LlmUsage>;
+  result(): Promise<RunTurnResult>;
 }
 
 export interface LlmPort {
+  /** Non-streaming turn, for structured one-shot calls (e.g. the deep planner). */
   runTurn(input: RunTurnInput): Promise<RunTurnResult>;
-  streamText(input: StreamTextInput): TextStream;
+  /** The loop's turn primitive: research and the answer both arrive through this. */
+  streamTurn(input: RunTurnInput): TurnStream;
 }

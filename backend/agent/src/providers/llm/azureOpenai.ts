@@ -15,8 +15,8 @@ import type {
   LlmUsage,
   RunTurnInput,
   RunTurnResult,
-  StreamTextInput,
-  TextStream
+  ToolCallRequest,
+  TurnStream
 } from './port.js';
 
 export interface AzureOpenAiConfig {
@@ -105,15 +105,15 @@ export function makeAzureOpenAiLlm(cfg: AzureOpenAiConfig): LlmPort {
       };
     },
 
-    streamText(input: StreamTextInput): TextStream {
-      let resolveUsage!: (u: LlmUsage) => void;
-      let rejectUsage!: (e: unknown) => void;
-      const usage = new Promise<LlmUsage>((res, rej) => {
-        resolveUsage = res;
-        rejectUsage = rej;
+    streamTurn(input: RunTurnInput): TurnStream {
+      let resolveResult!: (r: RunTurnResult) => void;
+      let rejectResult!: (e: unknown) => void;
+      const result = new Promise<RunTurnResult>((res, rej) => {
+        resolveResult = res;
+        rejectResult = rej;
       });
-      // Swallow nothing, but don't crash the process if usage() is never awaited after a throw.
-      usage.catch(() => undefined);
+      // Swallow nothing, but don't crash the process if result() is never awaited after a throw.
+      result.catch(() => undefined);
 
       const stream = (async function* () {
         try {
@@ -122,24 +122,51 @@ export function makeAzureOpenAiLlm(cfg: AzureOpenAiConfig): LlmPort {
               model: cfg.chatDeployment,
               messages: toOpenAiMessages(input.system, input.messages),
               stream: true,
-              stream_options: { include_usage: true }
+              stream_options: { include_usage: true },
+              ...(input.tools.length > 0
+                ? { tools: toOpenAiTools(input.tools), tool_choice: 'auto' as const }
+                : {})
             },
             input.signal ? { signal: input.signal } : undefined
           );
-          let final: LlmUsage = { in: 0, out: 0 };
+          // Tool-call ids and argument JSON arrive in fragments keyed by `index`.
+          const partials = new Map<number, { id: string; name: string; args: string }>();
+          let text = '';
+          let stopReason: RunTurnResult['stopReason'] = 'end_turn';
+          let usage: LlmUsage = { in: 0, out: 0 };
           for await (const chunk of events) {
-            const delta = chunk.choices[0]?.delta?.content;
-            if (delta) yield delta;
-            if (chunk.usage) final = { in: chunk.usage.prompt_tokens, out: chunk.usage.completion_tokens };
+            const choice = chunk.choices[0];
+            const delta = choice?.delta?.content;
+            if (delta) {
+              text += delta;
+              yield delta;
+            }
+            for (const frag of choice?.delta?.tool_calls ?? []) {
+              const acc = partials.get(frag.index) ?? { id: '', name: '', args: '' };
+              acc.id += frag.id ?? '';
+              acc.name += frag.function?.name ?? '';
+              acc.args += frag.function?.arguments ?? '';
+              partials.set(frag.index, acc);
+            }
+            if (choice?.finish_reason === 'tool_calls') stopReason = 'tool_use';
+            if (chunk.usage) usage = { in: chunk.usage.prompt_tokens, out: chunk.usage.completion_tokens };
           }
-          resolveUsage(final);
+          const toolCalls: ToolCallRequest[] = [...partials.entries()]
+            .sort(([a], [b]) => a - b)
+            .map(([, c]) => ({ id: c.id, name: c.name, input: parseArgs(c.args) }));
+          resolveResult({
+            toolCalls,
+            ...(text ? { text } : {}),
+            stopReason: toolCalls.length > 0 ? 'tool_use' : stopReason,
+            usage
+          });
         } catch (err) {
-          rejectUsage(err);
+          rejectResult(err);
           throw err; // open/mid-stream failure surfaces from the iterator (fail loud)
         }
       })();
 
-      return { stream, usage: () => usage };
+      return { stream, result: () => result };
     }
   };
 }
