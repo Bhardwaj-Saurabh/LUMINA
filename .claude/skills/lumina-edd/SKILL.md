@@ -27,7 +27,7 @@ is a red line, not a technique.**
 |------|---------|----------------|
 | 0 | `npm run typecheck && npm run lint && npm test` | Free, no providers. Always first. |
 | 1 | `node quality/check.mjs .` | C1 config sanity + trajectory rules (A1/A2/A3/R2) over `runs/*.json`. Free. |
-| 2 | `node benchmark/bench.mjs --smoke` | 5 quick queries end-to-end through the gateway. Costs a few LLM/search calls. **Smoke skips RAG, deep search, and memory** — it can never prove M5/M7/M8. |
+| 2 | `node benchmark/bench.mjs --smoke` | 5 quick queries end-to-end through the gateway, **then the RAG phase** (it skips only deep search and memory). Costs a few LLM/search calls. **Verified 2026-09-13: smoke crashes at `runRag` until Spaces + ingestion exist**, so it cannot complete before M7 — it is not an M2-closing gate. Until then its usable output is the contract probes + web workload, read from the console before the crash. |
 | 3 | `node benchmark/bench.mjs` | The full workload: web (50 % repeats), RAG gold set, ingest decoupling, deep-vs-quick pairs, memory, /stats. Costs real money — run when a capability is believed done, not per-edit. |
 | 4 | `node eval/eval.mjs [--deploy-url <url>]` | All six gates in order, stops at first failure. The `--deploy-url` form is what the grader runs. |
 
@@ -39,7 +39,7 @@ Both services must be up for rungs 2+ (`npm run dev`, or deployed). Bench refuse
 | Milestone | Gate rung | Caps / metrics that must flip |
 |-----------|-----------|-------------------------------|
 | M1 env/indexes | `create-indexes.mjs --status` | all 3 search indexes `queryable`; `/health` db ok |
-| M2 quick slice | 2 | smoke completes; `contractProbes` (401/404/400); `sourcesBeforeFirstToken`; a `runs/*.json` exists and rung 1 reads it |
+| M2 quick slice | 2 (partial, see above) | `contractProbes` (401/404/400 + `/evals` not 401); the web workload answering with 0 errors; `sourcesBeforeFirstToken`; a `runs/*.json` exists and rung 1 reads it. Smoke's *completion* is an M7 proof, not an M2 one |
 | M3 search cache | 2 then 3 | repeat query → `searchCached: true`; full-bench cache hit ≥ 50 % |
 | M4 threads/messages | 2 | follow-up sees thread; web workload green |
 | M5 memory | 3 (memory phase) | `memorySaved` · `memoryRecalled` (trace shows recall_memory in thread B) · `memoryDeleted` |
