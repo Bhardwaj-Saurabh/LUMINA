@@ -50,7 +50,8 @@ const app = makeAgentApp({
     fetchPage: makeTavilyFetchPage(secrets.tavily),
     messages: makeMessagesRepo(database),
     runs: makeRunsRepo(database),
-    requests: makeRequestsRepo(database)
+    requests: makeRequestsRepo(database),
+    log
   }),
   health
 });

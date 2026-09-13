@@ -28,6 +28,8 @@ export interface RunAskDeps {
   messages: MessagesWriter;
   runs: { upsert(doc: Record<string, unknown>): Promise<void> };
   requests: { insert(doc: Record<string, unknown>): Promise<void> };
+  /** One structured line per answer; `requestId` is what correlates it with the gateway's. */
+  log?: { info(obj: Record<string, unknown>, msg: string): void };
 }
 
 const resolveHost = async (host: string): Promise<string[]> =>
@@ -68,6 +70,7 @@ export function makeRunAsk(deps: RunAskDeps) {
     );
 
     const runlog = createRunLog({ depth: body.depth, now });
+    const toolCallLog: Array<{ name: string; ok: boolean }> = [];
     let answerText = '';
     let sources: SourcesEvent = [];
     let doneEvent: DoneEvent | undefined;
@@ -76,6 +79,7 @@ export function makeRunAsk(deps: RunAskDeps) {
       plan: (d) => emitter.plan(d),
       trace: (d) => {
         runlog.toolCall({ name: d.tool, ok: d.ok, ...(d.error ? { error: d.error } : {}), ms: d.ms });
+        toolCallLog.push({ name: d.tool, ok: d.ok });
         emitter.trace(d);
       },
       sources: (d) => {
@@ -142,6 +146,26 @@ export function makeRunAsk(deps: RunAskDeps) {
       terminated: outcome.terminated,
       depth: body.depth
     });
+
+    // §10: one line per answer, keyed by the same requestId the gateway logged, so a single
+    // request is greppable end to end across both services.
+    deps.log?.info(
+      {
+        requestId,
+        userId,
+        threadId,
+        answerId,
+        depth: body.depth,
+        terminated: outcome.terminated,
+        toolCalls: toolCallLog, // not runlog.build(): logging must never throw on an A1 violation
+        tokens: snapshot.tokens,
+        costUsd: snapshot.costUsd,
+        searchCached: doneEvent?.searchCached ?? false,
+        ttftMs: doneEvent?.ttftMs ?? null,
+        latencyMs: doneEvent?.latencyMs ?? now() - startedAt
+      },
+      'answer'
+    );
 
     if (outcome.terminated !== 'error') {
       const pair: ThreadMessage[] = [
