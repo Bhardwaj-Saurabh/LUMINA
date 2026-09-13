@@ -43,10 +43,20 @@ export interface LlmUsage {
   out: number;
 }
 
+/**
+ * Whether the turn MAY call a tool or MUST. `required` is how "every answer is grounded"
+ * becomes a property of the request rather than a line in the prompt — with optimistic
+ * streaming the first text delta is already sent, so there is no later point at which an
+ * ungrounded answer could be caught.
+ */
+export type LlmToolChoice = 'auto' | 'required';
+
 export interface RunTurnInput {
   system: string;
   messages: LlmMessage[];
   tools: LlmToolSpec[];
+  /** Defaults to 'auto'. Meaningless — and never sent — when `tools` is empty. */
+  toolChoice?: LlmToolChoice;
   /** Deadline propagation (§3.1): a hung provider call must not outlive the request budget. */
   signal?: AbortSignal;
 }

@@ -14,6 +14,8 @@ import { ToolRegistry } from '../core/registry.js';
 import { runLoop, type AskEmitter } from '../core/loop.js';
 import { makeWebSearchTool, makeFetchPageTool } from '../core/tools/webTools.js';
 import { makeRecallMemoryTool, makeSaveMemoryTool } from '../core/tools/memoryTools.js';
+import { makeSearchDocumentsTool } from '../core/tools/docTools.js';
+import { retrieveChunks, type ChunkSearchPort } from '../core/rag/retrieve.js';
 import { createRunLog } from '../obs/runlog.js';
 import { vetUrl } from '../guards/ssrf.js';
 import type { LlmPort, LlmMessage } from '../providers/llm/port.js';
@@ -39,6 +41,8 @@ export interface RunAskDeps {
   fetchPage: FetchPagePort;
   embeddings: EmbeddingsPort;
   memories: Pick<MemoriesRepo, 'insert' | 'searchByVector'>;
+  /** The two halves of hybrid retrieval; absent only in tests that never ask about a Space. */
+  chunks?: ChunkSearchPort;
   messages: MessagesWriter;
   runs: { upsert(doc: Record<string, unknown>): Promise<void> };
   requests: { insert(doc: Record<string, unknown>): Promise<void> };
@@ -48,6 +52,16 @@ export interface RunAskDeps {
 
 const resolveHost = async (host: string): Promise<string[]> =>
   (await lookup(host, { all: true })).map((a) => a.address);
+
+/**
+ * Router nudge for `mode: 'auto'` with a Space attached. Attaching a Space is a deliberate
+ * act, so the user's own material is the first place to look; the web stays available for
+ * what the Space cannot answer.
+ */
+const DOCS_GUIDANCE =
+  'The user has attached a Space of their own documents. Call search_documents FIRST — ' +
+  'they attached it because they expect the answer to come from it. Fall back to the web ' +
+  'only for what the documents do not cover, and say which is which.';
 
 const price = (usage: { in: number; out: number }): number =>
   (usage.in * env.llmInputUsdPerMtok + usage.out * env.llmOutputUsdPerMtok) / 1_000_000;
@@ -82,15 +96,46 @@ export function makeRunAsk(deps: RunAskDeps) {
       lru: deps.searchLru,
       now
     });
+    // The router (SPEC 5.4 "Should"): `mode` decides which retrieval surfaces EXIST for this
+    // request, structurally — the same discipline as depth. `auto` advertises both and lets
+    // the model choose, and its choice shows up in the trace as the tool it reached for.
+    const spaceId = body.spaceId;
+    const chunkSearch = deps.chunks;
+
     const registry = new ToolRegistry();
-    registry.register(makeWebSearchTool({ search: cachedSearch, collector }));
-    registry.register(
-      makeFetchPageTool({
-        fetchPage: deps.fetchPage,
-        vet: (url) => vetUrl(url, resolveHost),
-        collector
-      })
-    );
+    if (body.mode !== 'docs') {
+      registry.register(makeWebSearchTool({ search: cachedSearch, collector }));
+      registry.register(
+        makeFetchPageTool({
+          fetchPage: deps.fetchPage,
+          vet: (url) => vetUrl(url, resolveHost),
+          collector
+        })
+      );
+    }
+    const docsAvailable = body.mode !== 'web' && spaceId !== undefined && chunkSearch !== undefined;
+    if (docsAvailable) {
+      registry.register(
+        makeSearchDocumentsTool({
+          retrieve: (query, forSpace) =>
+            retrieveChunks(
+              { query, spaceId: forSpace, userId },
+              {
+                embeddings: deps.embeddings,
+                chunks: chunkSearch,
+                config: {
+                  topK: env.ragTopK,
+                  candidateK: env.ragCandidateK,
+                  numCandidates: env.ragNumCandidates,
+                  rrfK: env.ragRrfK
+                }
+              }
+            ),
+          collector,
+          spaceId
+        })
+      );
+    }
     // Memory is available in both gears; userId/threadId are request-scoped, never model input.
     registry.register(
       makeSaveMemoryTool({
@@ -151,7 +196,8 @@ export function makeRunAsk(deps: RunAskDeps) {
       answerId,
       model: env.llmModel,
       price,
-      searchCached: () => cachedSearch.stats().allHits
+      searchCached: () => cachedSearch.stats().allHits,
+      ...(docsAvailable ? { guidance: DOCS_GUIDANCE } : {})
     });
 
     // --- evidence + persistence: never claim more than what happened -------------------

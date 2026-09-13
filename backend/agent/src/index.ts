@@ -15,11 +15,18 @@ import { makeAzureOpenAiLlm } from './providers/llm/azureOpenai.js';
 import { makeAzureOpenAiEmbeddings } from './providers/embeddings/azureOpenai.js';
 import { makeTavilySearch, makeTavilyFetchPage } from './providers/search/tavily.js';
 import { createSearchLru } from './providers/search/cached.js';
+import { makeUploadDocumentHandler } from './http/uploadRoute.js';
 import { makeThreadsRepo } from './repos/threads.js';
 import { makeMessagesRepo } from './repos/messages.js';
 import { makeMemoriesRepo } from './repos/memories.js';
 import { makeRunsRepo, makeRequestsRepo } from './repos/runs.js';
 import { makeSearchCacheRepo } from './repos/searchCache.js';
+import { makeSpacesRepo } from './repos/spaces.js';
+import { makeDocumentsRepo } from './repos/documents.js';
+import { makeChunksRepo } from './repos/chunks.js';
+import { makeJobsRepo } from './repos/jobs.js';
+import { makeFileBucket } from './infra/gridfs.js';
+import { superviseWorker } from './workerSupervisor.js';
 
 const log = pino({ level: env.logLevel });
 
@@ -39,6 +46,10 @@ const embeddings = makeAzureOpenAiEmbeddings({
   deployment: env.azureEmbeddingDeployment || env.embeddingModel
 });
 const memories = makeMemoriesRepo(database);
+const spaces = makeSpacesRepo(database);
+const documents = makeDocumentsRepo(database);
+const chunks = makeChunksRepo(database);
+const files = makeFileBucket(database);
 
 const health = async (): Promise<HealthResponse> => {
   const dbStatus = await pingDb();
@@ -56,10 +67,20 @@ const app = makeAgentApp({
   threads: makeThreadsRepo(database),
   messages: makeMessagesRepo(database),
   memories,
+  spaces,
+  documents,
+  uploadDocument: makeUploadDocumentHandler({
+    spaces,
+    documents,
+    jobs: makeJobsRepo(database),
+    files,
+    now: Date.now
+  }),
   runAsk: makeRunAsk({
     llm,
     embeddings,
     memories,
+    chunks,
     search: makeTavilySearch(secrets.tavily),
     searchCache: makeSearchCacheRepo(database),
     searchLru: createSearchLru(),
@@ -71,6 +92,8 @@ const app = makeAgentApp({
   }),
   health
 });
+
+if (env.workerMode === 'child') superviseWorker(log);
 
 app.listen(env.port, () => {
   log.info(

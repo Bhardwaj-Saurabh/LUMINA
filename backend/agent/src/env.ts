@@ -44,6 +44,33 @@ export const env = {
 
   embeddingModel: process.env.EMBEDDING_MODEL ?? 'text-embedding-3-small',
 
+  // RAG: SPEC 5.4 requires top-k and thresholds to be CONFIG, not constants buried in the
+  // retriever — tuning recall must not need a code change.
+  /**
+   * Five, not eight: recall@5 is the gate, so chunks 6-8 are prompt tokens nobody scores —
+   * they cost input tokens and first-token latency on every document answer. The corpus
+   * puts it well: five chunks is roughly what fits alongside instructions and history.
+   */
+  ragTopK: num(process.env.RAG_TOP_K, 5),
+  /** Per half, before fusion: RRF needs depth to have anything to agree about. */
+  ragCandidateK: num(process.env.RAG_CANDIDATE_K, 24),
+  /** Atlas guidance: candidates well above the limit, or vector recall degrades. */
+  ragNumCandidates: num(process.env.RAG_NUM_CANDIDATES, 240),
+  ragRrfK: num(process.env.RAG_RRF_K, 60),
+  chunkTargetChars: num(process.env.CHUNK_TARGET_CHARS, 1200),
+  chunkOverlapChars: num(process.env.CHUNK_OVERLAP_CHARS, 150),
+  embedBatchSize: num(process.env.EMBED_BATCH_SIZE, 64),
+
+  // Jobs worker. The probe window has to outlast Atlas Search's indexing lag, which is
+  // seconds on a quiet M0 and longer on a busy one.
+  /** `child` (default) supervises the worker inside this container; `off` for a standalone one. */
+  workerMode: (process.env.WORKER_MODE ?? 'child') as 'child' | 'off',
+  workerPollMs: num(process.env.WORKER_POLL_MS, 1000),
+  workerLeaseMs: num(process.env.WORKER_LEASE_MS, 300000),
+  workerMaxAttempts: num(process.env.WORKER_MAX_ATTEMPTS, 3),
+  probeAttempts: num(process.env.PROBE_ATTEMPTS, 20),
+  probeDelayMs: num(process.env.PROBE_DELAY_MS, 1500),
+
   // Deep search is the expensive gear, so its limits are configuration, not code.
   deepSubQuestionsMin: num(process.env.DEEP_SUB_QUESTIONS_MIN, 3),
   deepSubQuestionsMax: num(process.env.DEEP_SUB_QUESTIONS_MAX, 6),

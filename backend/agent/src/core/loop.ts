@@ -22,6 +22,7 @@ import {
 import type {
   LlmMessage,
   LlmPort,
+  LlmToolChoice,
   LlmToolSpec,
   LlmUsage,
   RunTurnResult,
@@ -58,6 +59,11 @@ export interface RunLoopInput {
   /** Evaluated at done-time; true only when every search in the request was a cache hit. */
   searchCached: () => boolean;
   /**
+   * Per-request addendum to the system prompt — currently the router's mode guidance.
+   * Kept as data rather than branching inside the prompt so the loop stays mode-agnostic.
+   */
+  guidance?: string;
+  /**
    * Deadline signal factory (default AbortSignal.timeout) — injectable so tests control
    * time. An abort fired by this signal is a BUDGET event and maps to cap, never error.
    */
@@ -82,12 +88,23 @@ const SYSTEM_PROMPT =
   'ambiguous or too vague to search; do not embellish it with extra words like ' +
   '"official documentation" or "explained". Never mix narration with a tool call: ' +
   'either call tools, or write the final answer.\n' +
-  'Long-term memory is per user and spans threads. Call recall_memory early — before ' +
-  'searching — whenever the answer could depend on what this user prefers, works on, or ' +
-  'has told you before; a thread starts with no history, so recall is the only way to know. ' +
+  'Long-term memory is per user and spans threads, and it governs HOW to answer (tone, ' +
+  'length, language) as much as what to answer — so it bears on every question, including ' +
+  'ones that look purely factual. In your FIRST turn, call recall_memory alongside your ' +
+  'search, in that same turn: a thread starts with no history, so recall is the only way ' +
+  'to know, and putting it in the same turn costs no extra round trip. ' +
   'Call save_memory only for durable things the user states about themselves (preferences, ' +
   'constraints, ongoing projects, identity), never for facts you read in a search result or ' +
-  'a document.';
+  'a document.\n' +
+  'Cite a document chunk the same way you cite a web result: by its [n]. Document sources ' +
+  'render with their page, so never invent a page number in prose — the locator carries it.';
+
+/**
+ * The tools that actually bring evidence into a request. `fetch_page` is deliberately not
+ * here: it deepens evidence but cannot start a search, and the rubric counts a run as
+ * having retrieved only if it called one of these two.
+ */
+const RETRIEVAL_TOOLS = new Set(['web_search', 'search_documents']);
 
 function errorText(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
@@ -111,8 +128,10 @@ export async function runLoop(input: RunLoopInput): Promise<RunLoopOutcome> {
   const { llm, registry, depth, budget, collector, emitter, now, price } = input;
   const startedAt = now();
   const tools = registry.forDepth(depth).map(toToolSpec);
+  const retrievalTools = tools.filter((t) => RETRIEVAL_TOOLS.has(t.name));
   const messages: LlmMessage[] = [...(input.history ?? []), { role: 'user', content: input.query }];
   const makeSignal = input.makeSignal ?? ((ms: number) => AbortSignal.timeout(ms));
+  const system = input.guidance ? `${SYSTEM_PROMPT}\n${input.guidance}` : SYSTEM_PROMPT;
 
   let terminated: Terminated = 'done';
   let step = 0;
@@ -142,11 +161,33 @@ export async function runLoop(input: RunLoopInput): Promise<RunLoopOutcome> {
     typeof call.input.reason === 'string' ? { reason: call.input.reason } : {};
 
   /**
+   * A tool call is bounded by the same budget as a provider call. Found live: a Mongo pool
+   * reset made web_search hang and the request streamed its first token 230 s into a 90 s
+   * gear — the LLM turns had a deadline, the tool dispatch did not, so nothing was really
+   * bounded. The signal is also handed to the tool, so an adapter that can cancel its own
+   * I/O does; the race is what guarantees the loop stops waiting either way.
+   */
+  const dispatchWithDeadline = async (call: ToolCallRequest): Promise<unknown> => {
+    const signal = makeSignal(Math.max(budget.remainingMs(), 0));
+    const abandoned = new Promise<never>((_, reject) => {
+      const giveUp = () =>
+        reject(new Error(`${call.name} abandoned: it outlived the request budget`));
+      if (signal.aborted) giveUp();
+      else signal.addEventListener('abort', giveUp, { once: true });
+    });
+    abandoned.catch(() => undefined); // the race attaches the real handler; keep node quiet
+    return Promise.race([registry.dispatch(call.name, call.input, { depth, signal }), abandoned]);
+  };
+
+  /**
    * ONE provider round trip. Deltas become tokens as they arrive — a turn that speaks
    * before it asks for a tool IS the answer, so there is no second synthesis call. The
    * stream must be drained before `result()`, which the provider only sends last.
    */
-  const streamTurn = async (advertised: LlmToolSpec[]): Promise<TurnOutcome> => {
+  const streamTurn = async (
+    advertised: LlmToolSpec[],
+    toolChoice: LlmToolChoice = 'auto'
+  ): Promise<TurnOutcome> => {
     // §3.1: a hung provider call must not outlive the request budget (found live: a turn
     // that ran 295 s on a 90 s quick cap because nothing aborted it).
     const remaining = budget.remainingMs();
@@ -154,7 +195,7 @@ export async function runLoop(input: RunLoopInput): Promise<RunLoopOutcome> {
     const signal = makeSignal(remaining);
     let answered = false;
     try {
-      const turn = llm.streamTurn({ system: SYSTEM_PROMPT, messages, tools: advertised, signal });
+      const turn = llm.streamTurn({ system, messages, tools: advertised, toolChoice, signal });
       for await (const delta of turn.stream) {
         answered = true;
         emitToken(delta);
@@ -170,8 +211,24 @@ export async function runLoop(input: RunLoopInput): Promise<RunLoopOutcome> {
 
   // --- turns until the model answers, or admission is refused (cap) --------------------
   let capped = false;
+  /** Whether evidence has entered this request, and whether the offer has been narrowed. */
+  let retrieved = false;
+  let narrowed = false;
   research: for (;;) {
-    const outcome = await streamTurn(tools);
+    // Grounding is structural, not a line in the prompt: until something has actually been
+    // retrieved, the model must call a tool. An answer that skipped retrieval cites nothing,
+    // and optimistic streaming has already put its first token on the wire by the time we
+    // could notice — so this is the last point at which it can be insisted upon.
+    //
+    // The first attempt still offers everything, so retrieval and memory recall can happen
+    // in ONE turn instead of two. If that attempt comes back without a retrieval call, the
+    // offer narrows to retrieval only: measured live, a model told merely to "call a tool"
+    // reaches for the cheapest one it has and then answers from its own weights anyway.
+    const mustRetrieve = !retrieved && retrievalTools.length > 0;
+    const outcome = mustRetrieve
+      ? await streamTurn(narrowed ? retrievalTools : tools, 'required')
+      : await streamTurn(tools, 'auto');
+    if (mustRetrieve) narrowed = true;
     if (outcome.kind === 'error') return fail(outcome.err);
     if (outcome.kind === 'cap') {
       terminated = 'cap';
@@ -215,13 +272,14 @@ export async function runLoop(input: RunLoopInput): Promise<RunLoopOutcome> {
     // All admitted calls of one turn run concurrently and return as ONE tool_results message.
     const results: ToolResultPart[] = await Promise.all(
       admitted.map(async (call) => {
+        if (RETRIEVAL_TOOLS.has(call.name)) retrieved = true;
         const stepN = ++step;
         const t0 = now();
         // TraceEvent.tool is the contract enum; a hallucinated name is rejected by dispatch
         // (registry lookup) and the contract cannot represent its trace frame.
         const tool = call.name as TraceEvent['tool'];
         try {
-          const dispatched = await registry.dispatch(call.name, call.input, { depth });
+          const dispatched = await dispatchWithDeadline(call);
           emitter.trace({ step: stepN, tool, input: call.input, ok: true, ms: now() - t0, ...reasonOf(call) });
           return { toolCallId: call.id, ok: true, content: JSON.stringify(dispatched) };
         } catch (err) {

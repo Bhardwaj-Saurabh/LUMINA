@@ -782,3 +782,143 @@ describe('runLoop mixed narration and tool call', () => {
     expect(h.llm.streamTurnCalls).toHaveLength(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// k. RETRIEVAL IS NOT OPTIONAL — the first turn may not answer from memory alone
+// ---------------------------------------------------------------------------
+
+describe('runLoop retrieval enforcement', () => {
+  /**
+   * Found live: asked a gold question whose answer sat in an indexed Space, the model
+   * called recall_memory and then answered from its own weights — `sources: []`, a
+   * confident ungrounded answer, and a run that fails the rubric's minRetrievalRate (every
+   * answer must have called a retrieval tool). Optimistic streaming means the first text
+   * delta is already on the wire, so this cannot be caught after the fact: the only place
+   * to enforce it is the request itself. Tools advertised ⇒ the first turn MUST call one.
+   */
+  it('requires a RETRIEVAL tool on the first turn so an answer can never skip retrieval', async () => {
+    const h = harness([
+      { toolCalls: [{ id: 'c1', name: 'web_search', input: { query: 'lumina', reason: 'r' } }] },
+      { deltas: ['Grounded ', 'answer [1]'] }
+    ]);
+
+    await runLoop(loopInput(h) as never);
+
+    const first = h.llm.streamTurnCalls[0];
+    expect(first?.toolChoice).toBe('required');
+    // Everything stays on offer, so the model can retrieve AND recall in the same turn
+    // rather than paying a whole extra round trip for memory (measured: +1.5s of TTFT).
+    expect(first?.tools.map((t) => t.name)).toEqual(['web_search', 'fetch_page']);
+
+    // Evidence is in: the model is free again, including free to answer.
+    expect(h.llm.streamTurnCalls[1]?.toolChoice).toBe('auto');
+  });
+
+  it('narrows the offer to retrieval tools only after a forced turn dodged retrieval', async () => {
+    // Measured live: offered everything and told to pick something, the model called the
+    // cheapest tool it had (recall_memory) and answered from its own weights — sources [],
+    // a confidently ungrounded answer. Nothing has streamed yet at that point, so the loop
+    // can still insist; the second attempt has nothing but retrieval to choose from.
+    const h = harness(
+      [
+        { toolCalls: [{ id: 'c1', name: 'recall_memory', input: { query: 'prefs', reason: 'r' } }] },
+        { toolCalls: [{ id: 'c2', name: 'web_search', input: { query: 'lumina', reason: 'r' } }] },
+        { deltas: ['Grounded answer [1]'] }
+      ],
+      {
+        registry: (partial) => {
+          const registry = defaultRegistry(partial.collector);
+          registry.register({
+            name: 'recall_memory',
+            description: 'Recall what this user told you before. Not a citable source.',
+            schema: z.object({ query: z.string(), reason: z.string() }),
+            execute: async () => ({ memories: [] })
+          });
+          return registry;
+        }
+      }
+    );
+
+    await runLoop(loopInput(h) as never);
+
+    expect(h.llm.streamTurnCalls[0]?.tools.map((t) => t.name)).toContain('recall_memory');
+    const second = h.llm.streamTurnCalls[1];
+    expect(second?.toolChoice).toBe('required');
+    expect(second?.tools.map((t) => t.name)).toEqual(['web_search']);
+    // And once it has actually retrieved, the restriction lifts.
+    expect(h.llm.streamTurnCalls[2]?.toolChoice).toBe('auto');
+  });
+
+  it('forces nothing when there are no tools to force, so the capped finish can still answer', async () => {
+    // Budget refuses the second tool call; the finish turn advertises [] and must be able
+    // to answer with no tools at all — demanding a tool call there would deadlock the run.
+    const h = harness(
+      [
+        { toolCalls: [{ id: 'c1', name: 'web_search', input: { query: 'a', reason: 'r' } }] },
+        { toolCalls: [{ id: 'c2', name: 'web_search', input: { query: 'b', reason: 'r' } }] },
+        { deltas: ['Partial answer.'] }
+      ],
+      { budgetOverrides: { maxToolCalls: 1 } }
+    );
+
+    await runLoop(loopInput(h) as never);
+
+    const finish = h.llm.streamTurnCalls.at(-1);
+    expect(finish?.tools).toEqual([]);
+    expect(finish?.toolChoice).toBe('auto');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// l. TOOL CALLS ARE BOUNDED TOO — the budget covers the whole turn, not just the LLM
+// ---------------------------------------------------------------------------
+
+describe('runLoop tool deadline', () => {
+  /**
+   * Found live: a Mongo pool reset made web_search hang, and the request streamed its
+   * first token 230 SECONDS into a 90-second quick gear. The provider call had a deadline
+   * (test i); the tool dispatch did not, so nothing in the request was actually bounded.
+   * A budget that only covers the parts that were already fast is not a budget.
+   */
+  it('abandons a tool call that outlives the request budget, visibly and with an honest error', async () => {
+    const controllers: AbortController[] = [];
+    const makeSignal = (_ms: number) => {
+      const controller = new AbortController();
+      controllers.push(controller);
+      return controller.signal;
+    };
+
+    const h = harness(
+      [
+        { toolCalls: [{ id: 'c1', name: 'web_search', input: { query: 'q', reason: 'r' } }] },
+        { deltas: ['Answering from what little arrived.'] }
+      ],
+      {
+        registry: () => {
+          const registry = new ToolRegistry();
+          registry.register({
+            name: 'web_search',
+            description: 'never resolves',
+            schema: z.object({ query: z.string(), reason: z.string() }),
+            // Never settles on its own: only the deadline can end this call.
+            execute: () => new Promise<never>(() => {})
+          });
+          return registry;
+        }
+      }
+    );
+
+    const run = runLoop(loopInput(h, { makeSignal }) as never);
+    // Let the loop reach the hung dispatch, then fire every live deadline.
+    await new Promise((r) => setTimeout(r, 0));
+    for (const controller of controllers) controller.abort();
+    const outcome = await run;
+
+    const traces = framesOf(h.emitter, 'trace').map((f) => TraceEvent.parse(f.data));
+    const hung = traces.find((t) => t.tool === 'web_search');
+    expect(hung?.ok).toBe(false);
+    expect(hung?.error).toMatch(/budget|deadline|abandoned/i);
+    // It resolves rather than hanging forever, and never claims the tool succeeded.
+    expect(['cap', 'done', 'error']).toContain(outcome.terminated);
+  });
+});

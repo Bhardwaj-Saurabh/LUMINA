@@ -174,7 +174,8 @@ export function scriptedLlm(
   const snapshot = (input: RunTurnInput): RunTurnInput => ({
     system: input.system,
     messages: [...input.messages],
-    tools: [...input.tools]
+    tools: [...input.tools],
+    toolChoice: input.toolChoice ?? 'auto'
   });
 
   const resultOf = (turn: Exclude<ScriptedTurn, { throws: Error }>): RunTurnResult => {

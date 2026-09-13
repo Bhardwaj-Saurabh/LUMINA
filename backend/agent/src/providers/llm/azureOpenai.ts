@@ -87,7 +87,7 @@ export function makeAzureOpenAiLlm(cfg: AzureOpenAiConfig): LlmPort {
           model: cfg.chatDeployment,
           messages: toOpenAiMessages(input.system, input.messages),
           ...(input.tools.length > 0
-            ? { tools: toOpenAiTools(input.tools), tool_choice: 'auto' as const }
+            ? { tools: toOpenAiTools(input.tools), tool_choice: input.toolChoice ?? ('auto' as const) }
             : {})
         },
         input.signal ? { signal: input.signal } : undefined
@@ -124,7 +124,7 @@ export function makeAzureOpenAiLlm(cfg: AzureOpenAiConfig): LlmPort {
               stream: true,
               stream_options: { include_usage: true },
               ...(input.tools.length > 0
-                ? { tools: toOpenAiTools(input.tools), tool_choice: 'auto' as const }
+                ? { tools: toOpenAiTools(input.tools), tool_choice: input.toolChoice ?? ('auto' as const) }
                 : {})
             },
             input.signal ? { signal: input.signal } : undefined

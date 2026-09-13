@@ -10,6 +10,8 @@ import { DEEP_ONLY_TOOLS, type Depth } from '@lumina/contract';
 /** Carried through to execute untouched; `depth` is what dispatch gates on. */
 export interface ToolContext {
   depth: string;
+  /** The request's remaining budget, so a tool that can cancel its own I/O does. */
+  signal?: AbortSignal;
 }
 
 export interface ToolDef {

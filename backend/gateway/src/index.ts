@@ -14,7 +14,11 @@ import { makeAgentClient } from './proxy/client.js';
 import { env } from './env.js';
 
 /** Guardrail 9 (ARCHITECTURE.md §5): steady rate from env, short burst for a page's first paint. */
-const RATE_LIMIT_BURST = 10;
+const RATE_LIMIT_BURST = 60;
+/** An answer and an ingest do real work; a status poll or a thread read does not. */
+const EXPENSIVE_COST = 5;
+const isExpensive = (req: { method: string; path: string }): boolean =>
+  req.method === 'POST' && (req.path.endsWith('/ask') || req.path.endsWith('/documents'));
 
 const log = pino({ level: env.logLevel });
 
@@ -23,7 +27,8 @@ const app = makeGatewayApp({
   rateLimit: makeRateLimit({
     perMinute: env.rateLimitPerMinute,
     burst: RATE_LIMIT_BURST,
-    now: Date.now
+    now: Date.now,
+    cost: (req) => (isExpensive(req) ? EXPENSIVE_COST : 1)
   }),
   corsOrigins: env.corsOrigins,
   ...(existsSync(env.webDist) ? { webDist: env.webDist } : {}),

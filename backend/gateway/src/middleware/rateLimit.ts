@@ -11,6 +11,12 @@ export interface RateLimitOptions {
   burst: number;
   /** Injected millisecond clock — no Date.now() in the hot path, so tests stay deterministic. */
   now: () => number;
+  /**
+   * Tokens a request costs. A document-status poll and a streamed LLM answer are not the
+   * same request: priced identically, either the answer path is effectively unprotected or
+   * polling is throttled to uselessness. Defaults to 1 for everything.
+   */
+  cost?: (req: express.Request) => number;
 }
 
 interface Bucket {
@@ -18,7 +24,12 @@ interface Bucket {
   updatedAt: number;
 }
 
-export function makeRateLimit({ perMinute, burst, now }: RateLimitOptions): express.RequestHandler {
+export function makeRateLimit({
+  perMinute,
+  burst,
+  now,
+  cost = () => 1
+}: RateLimitOptions): express.RequestHandler {
   const perSecond = perMinute / 60;
   const buckets = new Map<string, Bucket>();
 
@@ -38,15 +49,18 @@ export function makeRateLimit({ perMinute, burst, now }: RateLimitOptions): expr
       return;
     }
 
+    const price = Math.max(1, cost(req));
     const bucket = refill(userId, now());
-    if (bucket.tokens >= 1) {
-      bucket.tokens -= 1;
+    if (bucket.tokens >= price) {
+      bucket.tokens -= price;
       next();
       return;
     }
 
-    // A throttled request costs nothing: the bucket only pays for admitted work.
-    const waitSeconds = perSecond > 0 ? (1 - bucket.tokens) / perSecond : Number.POSITIVE_INFINITY;
+    // A throttled request costs nothing: the bucket only pays for admitted work. The wait
+    // covers this request's FULL price — telling it to come back in a second, when a second
+    // only buys one of the five tokens it needs, just books another 429.
+    const waitSeconds = perSecond > 0 ? (price - bucket.tokens) / perSecond : Number.POSITIVE_INFINITY;
     const body: ErrorBody = {
       error: `rate limit exceeded for ${userId}: ${perMinute}/min, burst ${burst}`,
       status: 429,

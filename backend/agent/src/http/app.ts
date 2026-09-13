@@ -7,20 +7,26 @@
 import express from 'express';
 import {
   AskBody,
+  CreateSpaceBody,
   CreateThreadBody,
   newId,
   ROUTES,
   USER_HEADER,
   type ErrorBody,
   type HealthResponse,
+  type CreateSpaceResponse,
   type CreateThreadResponse,
   type GetThreadResponse,
+  type ListDocumentsResponse,
   type ListMemoryResponse,
+  type ListSpacesResponse,
   type ThreadMessage
 } from '@lumina/contract';
 import type { z } from 'zod';
 import type { AskEmitter } from '../core/loop.js';
+import type { DocumentsRepo } from '../repos/documents.js';
 import type { MemoriesRepo } from '../repos/memories.js';
+import type { SpacesRepo } from '../repos/spaces.js';
 import { createSseSink } from './sseSink.js';
 
 export interface ThreadRow {
@@ -53,6 +59,11 @@ export interface AgentAppDeps {
   messages: MessagesRepo;
   /** Absent until wired: the memory routes stay 501 rather than pretending to be empty. */
   memories?: Pick<MemoriesRepo, 'list' | 'delete'>;
+  /** Same rule for Spaces: no dep, no empty-but-successful answer. */
+  spaces?: SpacesRepo;
+  documents?: Pick<DocumentsRepo, 'listBySpace'>;
+  /** The multipart upload route, built by makeUploadDocumentHandler. */
+  uploadDocument?: express.RequestHandler;
   runAsk(input: RunAskInput): Promise<void>;
   health(): Promise<HealthResponse>;
 }
@@ -188,6 +199,58 @@ export function makeAgentApp(deps: AgentAppDeps): express.Express {
     };
   }
 
+  const spaces = deps.spaces;
+  const documents = deps.documents;
+  if (spaces) {
+    handlers['POST /spaces'] = async (req, res) => {
+      const parsed = CreateSpaceBody.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        res.status(400).json(errorBody(400, parsed.error.message));
+        return;
+      }
+      const row = {
+        spaceId: newId('spc'),
+        userId: userOf(res),
+        name: parsed.data.name,
+        createdAt: new Date().toISOString()
+      };
+      await spaces.insert(row);
+      const body: CreateSpaceResponse = { spaceId: row.spaceId, name: row.name };
+      res.status(201).json(body);
+    };
+
+    handlers['GET /spaces'] = async (_req, res) => {
+      const rows = await spaces.listByUser(userOf(res));
+      const body: ListSpacesResponse = {
+        spaces: rows.map((r) => ({ spaceId: r.spaceId, name: r.name, createdAt: r.createdAt }))
+      };
+      res.status(200).json(body);
+    };
+
+  }
+
+  if (spaces && documents) {
+    handlers['GET /spaces/:spaceId/documents'] = async (req, res) => {
+      const spaceId = req.params.spaceId!;
+      // Ownership before the read: a foreign Space is unknown — 404, never 403 — and its
+      // documents are never queried.
+      const owned = await spaces.findOwned({ spaceId, userId: userOf(res) });
+      if (!owned) {
+        res.status(404).json(errorBody(404, `no space ${spaceId}`));
+        return;
+      }
+      const body: ListDocumentsResponse = {
+        documents: await documents.listBySpace({ spaceId, userId: userOf(res) })
+      };
+      res.status(200).json(body);
+    };
+  }
+
+  /** Routes whose handler is a middleware, not a Handler (multipart streaming). */
+  const middleware: Record<string, express.RequestHandler> = deps.uploadDocument
+    ? { 'POST /spaces/:spaceId/documents': deps.uploadDocument }
+    : {};
+
   for (const route of ROUTES) {
     if (route.path === '/evals/report.json') continue; // published artifact, later milestone
     const method = route.method.toLowerCase() as 'get' | 'post' | 'delete';
@@ -197,7 +260,8 @@ export function makeAgentApp(deps: AgentAppDeps): express.Express {
       (async (_req: express.Request, res: express.Response) => {
         res.status(501).json(errorBody(501, `not implemented yet: ${key}`));
       });
-    const chain = route.auth ? [requireUser, wrap(handler)] : [wrap(handler)];
+    const mounted = middleware[key] ?? wrap(handler);
+    const chain = route.auth ? [requireUser, mounted] : [mounted];
     app[method](route.path, ...chain);
   }
 

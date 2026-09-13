@@ -17,7 +17,16 @@ export const env = {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
-  rateLimitPerMinute: num(process.env.RATE_LIMIT_PER_MINUTE, 30),
+  /**
+   * Token budget per user per minute, spent at `RATE_LIMIT_ASK_COST` for an answer or an
+   * ingest and 1 for everything else — so 600 means ~120 answers/min or ~600 status polls.
+   *
+   * 30/min flat looked generous for one human and was not: the grader drives 40 web + 30
+   * doc queries at concurrency 4 under a single user id AND polls document status every
+   * 1.2s, so it was collecting 429s that count against the error-rate SLA. Found live.
+   * Weighting is what lets polling stay cheap without leaving the expensive path unguarded.
+   */
+  rateLimitPerMinute: num(process.env.RATE_LIMIT_PER_MINUTE, 600),
   logLevel: process.env.LOG_LEVEL ?? 'info',
   /** Serve the built UI from the gateway in production so one host serves / and /evals. */
   webDist: resolve(process.cwd(), '../../web/dist')

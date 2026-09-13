@@ -9,9 +9,9 @@
 
 | | |
 |---|---|
-| **Current milestone** | M7 RAG (the big lift; also unblocks a completing bench run) |
-| **Blockers** | none |
-| **Last gates run** | 2026-09-13 `bench --smoke` via :8787: contract probes 4/4 ✓, web workload 5/5 answered 0 errors, then crashed at `runRag` (POST /spaces 501 — M7). `quality/check.mjs .` exit 1 (warnings only, 0 errors) |
+| **Current milestone** | M8 deep search |
+| **Blockers** | none. One open SLA item carried to M9: **ttft p95 3060 ms vs 2500 ms** — the only red line in an otherwise green smoke bench |
+| **Last gates run** | 2026-09-13 `bench --smoke` via :8787 **completed for the first time**: 4/4 contract probes ✓, 5/5 web answered 0 errors, 4/4 corpus files indexed (202 in 120–152 ms), recall@5 3/3, citation grounding 1.0 with 0 dangling, cost $0.0011/answer, sources-before-token ✓ — and ✗ ttft p95 3060 ms (gate 2500). Bench verdict: FAILED on that one target |
 | **Deploy state** | not deployed |
 
 ## Milestones
@@ -27,9 +27,9 @@ Legend: ☐ not started · 🔨 in progress · ✅ done (EDD proof recorded)
 | M4 | Threads + messages persistence; follow-ups see the thread | threads/messages repo units; getThread route test | UI thread reload; bench web workload green | ☐ |
 | M5 | Memory: save/recall tools, `GET /memory`, `DELETE /memory/:id`, cross-thread effect | memory tool units w/ fake embeddings; route tests | 2026-09-13 live: thread A `save_memory` ✓ → `GET /memory` lists it → fresh thread B calls `recall_memory` FIRST and answers in the saved style → DELETE 204, re-DELETE 404, foreign 404, list empty. 29 unit tests | ✅ |
 | M6 | Gateway complete: auth 401, zod 400, rate limit 429, IAM-ready proxy, SSE pass-through, upload pipe, `/evals` SPA route | middleware units; askProxy stream test; 413 test | 2026-09-13: 39/39 gateway tests; live through :8787 — 401/400/404 probes correct, SSE streams trace→sources→token→done, one requestId greps both logs | ✅ (upload proxy deliberately 501 until M7) |
-| M7 | RAG: spaces, upload 202 <300 ms, jobs worker (lease+checkpoints), pdfjs parse, chunk+locators, embed, hybrid RRF, read-your-write probe | jobStateMachine, chunker/locator, RRF units; pipeline test w/ fake embeddings | bench caps `accept202`, `indexedViaWorker`, `pageLocator`, `routerPicksDocs`; recall@5 ≥ 0.70 | ☐ |
+| M7 | RAG: spaces, upload 202 <300 ms, jobs worker (lease+sweeper), pdfjs page-aware parse, chunk+locators, embed, hybrid RRF, read-your-write probe, `search_documents`, mode router | chunker/locator, RRF, jobState, ingest-pipeline, retrieve, docTools, spaces routes, upload route (98 tests) | 2026-09-13 `bench --smoke`: `accept202` 202 in 120–152 ms ✓ · `indexedViaWorker` 4/4 ✓ · `pageLocator` ✓ · `routerPicksDocs` ✓ (live: mode=auto reached for the Space) · recall@5 3/3 smoke, **39/39 = 1.000 over the full gold set** ✓ · grounding 1.0, 0 dangling | ✅ |
 | M8 | Deep search: plan-first, p-limit(3) fan-out, merge/renumber, subQuestion tags, DEEP_DAILY_CAP 429, quick-never-escalates | planner validation, merge dedupe/renumber, deepCap ledger units; deep orchestrator test w/ fake ports | bench caps `deepPlan`, `deepAttribution`, `deepReadsMore`, `deepBudget`, `deepCap429`, `quickNeverEscalates` | ☐ |
-| M9 | Full local proof: bench exit 0 vs sla.json; quality exit ≤ 1; failing trajectory in `runs/failing/` | regression tests for every gate failure found | `node benchmark/bench.mjs` exit 0 · `node quality/check.mjs .` exit ≤ 1 | ☐ |
+| M9 | Full local proof: bench exit 0 vs sla.json; quality exit ≤ 1; failing trajectory in `runs/failing/`; `/stats` route; `sla.json` `cost_model` re-declared with real Azure rates. **Carries the one open SLA item: ttft p95** | regression tests for every gate failure found | `node benchmark/bench.mjs` exit 0 · `node quality/check.mjs .` exit ≤ 1 | ☐ |
 | M10 | Containerize (2 Dockerfiles), Cloud Run deploy (agent IAM-gated), Vercel UI, indexes on Atlas, deployed eval, report published, `/evals` renders | image smoke (USER node, ports, worker supervision) | `eval/eval.mjs --deploy-url` all gates; `/evals` on the Vercel URL renders the real report | ☐ |
 
 ## Session log (append-only)
@@ -52,3 +52,30 @@ Legend: ☐ not started · 🔨 in progress · ✅ done (EDD proof recorded)
 | 2026-09-13 | **M2 + M6 closed on real evidence.** `bench --smoke` through :8787: 4/4 contract probes ✓, 5/5 web queries answered with 0 errors, run logs written and read by the quality kit (0 errors). DISCOVERY: `--smoke` also runs the RAG phase, so it cannot complete until M7 — the lumina-edd milestone→proof map claimed smoke proves M2 and has been corrected rather than worked around | 100 agent + 39 gw ✅ | probes ✓ · workload ✓ · quality exit 1 ✅ · smoke blocked at runRag (honest: NOT a pass) | M3 search cache, then M7 RAG (which unblocks a completing smoke) | bench exit code not captured (piped to tail); the crash itself is unambiguous in the console output |
 | 2026-09-13 | **M3 search cache** (27 tests): `infra/lru.ts` (true LRU), `providers/search/cached.ts` (sha256 key over normalized query+provider, L1→L2→provider, expiry enforced on READ at both tiers since Mongo's TTL sweeper lags, in-flight dedupe, time-sensitive bypass), `repos/searchCache.ts`; wired per-request (stats isolated) over one process-wide LRU, so `searchCached` is finally honest. Also: gateway upload proxy finished (streams multipart, 413 from the cap) — M6 fully done. FINDING: cache hits initially looked broken because the MODEL rephrases its search each run (two keys, two paid searches); a system-prompt nudge to reuse the user's wording fixed it | 168 (127 agent + 41 gw) ✅ | live: cold 2554 ms miss → warm 1077/2065 ms hits, `searchCached: true` ✅ | M5 memory (vector index already live), then M7 RAG | **TTFT now at/under the 2500 ms SLA on repeats** (was 8.2 s at session start). Zero searches ⇒ allHits false; an in-flight join counts as a miss — both keep `searchCached` honest |
 | 2026-09-13 | **M5 memory** (29 tests): `providers/embeddings/{port,azureOpenai}.ts` (always sends `dimensions: 1536` — the deployment is text-embedding-3-large, native 3072 — and sorts the batch by `index`, which the API does not guarantee), `core/tools/memoryTools.ts` (userId comes from request context, never model input — a hostile `{userId}` in tool args is stripped), `repos/memories.ts` ($vectorSearch with `filter:{userId}` INSIDE the stage; delete filters on owner so foreign reads as unknown), memory routes, and SYSTEM_PROMPT guidance so the model actually recalls in a fresh thread | 197 (156 agent + 41 gw) ✅ | live cross-thread recall ✓ · delete 204/404/404 ✓ · list empty after ✓ | M7 RAG: spaces, upload→202, jobs worker, pdfjs, chunking, hybrid RRF, read-your-write probe | Embeddings path now proven live, which de-risks M7's biggest unknown |
+| 2026-09-13 | **M7 RAG** (98 new tests, 302 total): `core/rag/{chunker,rrf,jobState,ingest,retrieve}.ts`, `core/tools/docTools.ts`, `repos/{spaces,documents,chunks,jobs}.ts`, `infra/gridfs.ts`, `providers/parse/pdf.ts`, `http/{uploadRoute,app}.ts` (multer→GridFS streaming storage engine), `worker.ts` + `workerSupervisor.ts` (child process, `--no-cpu-throttling` shape), mode router in `runAsk`. **bench --smoke completed for the first time** | 302 (258 agent + 44 gw) ✅ | smoke: accept202 ✓ · indexedViaWorker 4/4 ✓ · pageLocator ✓ · routerPicksDocs ✓ · recall@5 3/3 (39/39 full gold) · grounding 1.0 · **✗ ttft p95 3060 ms** | M8 deep search; ttft p95 to M9 | Three live-only bugs — see notes below |
+
+### M7 findings — three bugs only a live run could surface
+
+1. **The rate limit was throttling the grader, not an abuser.** 30/min flat was tighter than
+   the bench's own workload (40 web + 30 doc queries at concurrency 4, plus document-status
+   polling every 1.2 s), and every 429 counts against the error-rate SLA. Fixed by making the
+   limiter *weighted* — an answer or an ingest costs 5 tokens, a status poll costs 1 — so
+   polling stays cheap without leaving the expensive path unguarded. 3 new gateway tests.
+2. **The model could answer without retrieving at all.** Asked a gold question whose answer
+   sat in an indexed Space, it called `recall_memory` and then answered from its own weights:
+   `sources: []`, a confidently ungrounded answer, and a run that fails the rubric's
+   `retrievalRate >= 1`. Optimistic streaming means the first token is already on the wire
+   before this is detectable, so the fix had to be in the request: until something has been
+   retrieved, `tool_choice: 'required'`. Forcing *a* tool was not enough — offered everything,
+   the model picked the cheapest one (recall@5 actually FELL to 0.897) — so a turn that comes
+   back without a retrieval call narrows the offer to retrieval tools only. Recall and search
+   still share one turn, so memory costs no extra round trip.
+3. **Tool calls were unbounded.** A Mongo pool reset made `web_search` hang and a request
+   streamed its first token **230 seconds** into a 90-second gear. LLM turns had a deadline
+   since M2; tool dispatch did not, so nothing in the request was actually bounded. Each
+   dispatch now races the remaining budget and the signal is handed to the tool.
+
+Also: fixing (2) regressed M5 — the forced search satisfied the model and it stopped recalling
+across threads, failing `memoryRecalled`. Caught by replaying the grader's exact memory
+scenario rather than trusting the unit tests, and fixed in the prompt (recall governs *how* to
+answer, so it belongs in the first turn alongside the search, not in a turn of its own).
