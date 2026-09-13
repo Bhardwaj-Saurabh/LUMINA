@@ -29,10 +29,22 @@ export type AgentAskResponse = {
   stream: AsyncIterable<Uint8Array | string>;
 };
 
+/**
+ * A document upload. The body is the raw request stream: the gateway pipes it upstream
+ * rather than buffering, so a 25 MB PDF never lands in edge memory.
+ */
+export type AgentUploadRequest = {
+  spaceId: string;
+  body: AsyncIterable<Uint8Array>;
+  headers: Record<string, string>;
+  signal?: AbortSignal;
+};
+
 export type AgentClient = {
   health(): Promise<HealthResponse>;
   json(req: AgentJsonRequest): Promise<AgentJsonResponse>;
   ask(req: AgentAskRequest): Promise<AgentAskResponse>;
+  upload(req: AgentUploadRequest): Promise<AgentJsonResponse>;
 };
 
 export interface AgentClientOptions {
@@ -127,6 +139,25 @@ export function makeAgentClient({
         headers: headersToObject(res.headers),
         stream: toAsyncIterable(res.body)
       };
+    },
+
+    async upload(req) {
+      const res = await doFetch(`${root}/spaces/${req.spaceId}/documents`, {
+        method: 'POST',
+        headers: {
+          // The multipart boundary lives in content-type and must survive untouched.
+          ...forwardable(req.headers),
+          ...(await authHeaders())
+        },
+        // A Node Readable is a valid streaming body for undici; the DOM lib's BodyInit
+        // (which this tsconfig does not load) cannot express it.
+        body: req.body as unknown,
+        // Streaming a request body requires half-duplex; without it undici buffers.
+        duplex: 'half',
+        ...(req.signal ? { signal: req.signal } : {})
+      } as RequestInit);
+      const text = await res.text();
+      return { status: res.status, body: text ? (JSON.parse(text) as unknown) : undefined };
     }
   };
 }

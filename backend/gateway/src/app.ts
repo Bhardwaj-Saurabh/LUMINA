@@ -16,6 +16,7 @@ import {
   REQUEST_HEADER,
   ROUTES,
   USER_HEADER,
+  MAX_UPLOAD_BYTES,
   type ErrorBody
 } from '@lumina/contract';
 import type { AgentClient, AgentJsonRequest } from './proxy/client.js';
@@ -59,9 +60,6 @@ const queryOf = (req: express.Request): Record<string, string> =>
   Object.fromEntries(
     Object.entries(req.query).flatMap(([k, v]) => (typeof v === 'string' ? [[k, v]] : []))
   );
-
-/** The upload route needs a multipart stream proxy (§2.1 uploadProxy) — not built yet. */
-const UNBUILT = new Set(['POST /spaces/:spaceId/documents']);
 
 export function makeGatewayApp(deps: GatewayAppDeps): express.Express {
   const { agent } = deps;
@@ -176,21 +174,45 @@ export function makeGatewayApp(deps: GatewayAppDeps): express.Express {
     res.end();
   };
 
+  /**
+   * Multipart upload: the request stream is piped upstream, never buffered — a 25 MB PDF
+   * must not land in edge memory. The declared cap is enforced here from Content-Length so
+   * an over-sized upload costs the agent nothing; the agent re-checks the real byte count.
+   */
+  const upload: Handler = async (req, res) => {
+    const declared = Number(req.header('content-length') ?? '0');
+    if (Number.isFinite(declared) && declared > MAX_UPLOAD_BYTES) {
+      res.status(413).json(errorBody(res, 413, `file too large: limit ${MAX_UPLOAD_BYTES} bytes`));
+      return;
+    }
+    const aborter = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) aborter.abort();
+    });
+    const contentType = req.header('content-type');
+    const upstream = await agent.upload({
+      spaceId: String(req.params.spaceId),
+      body: req,
+      // The multipart boundary lives in content-type: drop it and the agent cannot parse the form.
+      headers: {
+        ...forwardedHeaders(req, res),
+        ...(contentType ? { 'content-type': contentType } : {})
+      },
+      signal: aborter.signal
+    });
+    res.status(upstream.status).json(upstream.body);
+  };
+
   const handlers: Record<string, Handler> = {
     'GET /health': health,
-    'POST /threads/:threadId/ask': ask
+    'POST /threads/:threadId/ask': ask,
+    'POST /spaces/:spaceId/documents': upload
   };
 
   for (const route of ROUTES) {
     const key = `${route.method} ${route.path}`;
     const method = route.method.toLowerCase() as 'get' | 'post' | 'delete';
-    const handler =
-      handlers[key] ??
-      (UNBUILT.has(key)
-        ? async (_req: express.Request, res: express.Response) => {
-            res.status(501).json(errorBody(res, 501, `not implemented yet: ${key}`));
-          }
-        : jsonProxy(route.method));
+    const handler = handlers[key] ?? jsonProxy(route.method);
     const chain = route.auth ? [requireUser, wrap(handler)] : [wrap(handler)];
     app[method](route.path, ...chain);
   }

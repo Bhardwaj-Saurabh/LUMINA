@@ -41,21 +41,41 @@ export type AgentAskResponse = {
   stream: AsyncIterable<Uint8Array | string>;
 };
 
+/**
+ * A document upload. The gateway must PIPE the request body upstream rather than buffer it
+ * (a 25 MB PDF in memory on the edge is the thing this shape exists to prevent), so the
+ * body is the raw readable, not a parsed form.
+ */
+export type AgentUploadRequest = {
+  spaceId: string;
+  /** The untouched request stream, forwarded with its multipart boundary intact. */
+  body: AsyncIterable<Uint8Array>;
+  headers: Record<string, string>;
+  signal?: AbortSignal;
+};
+
 export type AgentClient = {
   health(): Promise<HealthResponse>;
   json(req: AgentJsonRequest): Promise<AgentJsonResponse>;
   ask(req: AgentAskRequest): Promise<AgentAskResponse>;
+  upload(req: AgentUploadRequest): Promise<AgentJsonResponse>;
 };
 
 export type AgentScript = {
   health?: () => HealthResponse | Promise<HealthResponse>;
   json?: (req: AgentJsonRequest) => AgentJsonResponse | Promise<AgentJsonResponse>;
   ask?: (req: AgentAskRequest) => AgentAskResponse | Promise<AgentAskResponse>;
+  upload?: (req: AgentUploadRequest) => AgentJsonResponse | Promise<AgentJsonResponse>;
 };
 
 export type ScriptedAgent = {
   client: AgentClient;
-  calls: { health: number; json: AgentJsonRequest[]; ask: AgentAskRequest[] };
+  calls: {
+    health: number;
+    json: AgentJsonRequest[];
+    ask: AgentAskRequest[];
+    upload: AgentUploadRequest[];
+  };
 };
 
 export const okHealth: HealthResponse = {
@@ -68,7 +88,7 @@ export const okHealth: HealthResponse = {
 
 /** A recording, scripted AgentClient. Unscripted methods answer a harmless default. */
 export function fakeAgent(script: AgentScript = {}): ScriptedAgent {
-  const calls: ScriptedAgent['calls'] = { health: 0, json: [], ask: [] };
+  const calls: ScriptedAgent['calls'] = { health: 0, json: [], ask: [], upload: [] };
 
   const client: AgentClient = {
     async health() {
@@ -83,6 +103,12 @@ export function fakeAgent(script: AgentScript = {}): ScriptedAgent {
       calls.ask.push(req);
       if (!script.ask) throw new Error('fakeAgent: ask was not scripted');
       return script.ask(req);
+    },
+    async upload(req) {
+      calls.upload.push(req);
+      return script.upload
+        ? script.upload(req)
+        : { status: 202, body: { docId: 'doc_fake1', status: 'pending' } };
     }
   };
 

@@ -6,7 +6,9 @@ import {
   HealthResponse,
   ListThreadsResponse,
   REQUEST_HEADER,
+  MAX_UPLOAD_BYTES,
   ROUTES,
+  UploadDocumentResponse,
   USER_HEADER
 } from '@lumina/contract';
 import { makeGatewayApp } from './app.js';
@@ -343,5 +345,47 @@ describe('gateway SSE pass-through with a slow upstream', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toContain('text/event-stream');
     expect(res.text).toBe(FRAMES.join(''));
+  });
+});
+
+// ---------------------------------------------------------------- document upload
+/**
+ * The upload proxy (ARCHITECTURE §2.1 `proxy/uploadProxy.ts`). The gateway must forward the
+ * multipart body as a STREAM — buffering a 25 MB PDF on the edge is exactly what the
+ * contract's size cap exists to prevent — and must answer 413 from the declared limit
+ * without troubling the agent.
+ */
+describe('gateway document upload', () => {
+  it('forwards a multipart upload and returns the agent 202 verbatim', async () => {
+    const agent = fakeAgent({
+      upload: async () => ({ status: 202, body: { docId: 'doc_abc1', status: 'pending' } })
+    });
+
+    const res = await request(buildApp(agent))
+      .post('/spaces/spc_test1/documents')
+      .set(USER_HEADER, 'dev')
+      .attach('file', Buffer.from('%PDF-1.4 fake pdf bytes'), 'paper.pdf');
+
+    expect(res.status).toBe(202);
+    expect(UploadDocumentResponse.parse(res.body).docId).toBe('doc_abc1');
+    expect(agent.calls.upload).toHaveLength(1);
+    expect(agent.calls.upload[0]!.spaceId).toBe('spc_test1');
+    // The multipart boundary must survive, or the agent cannot parse the form.
+    expect(agent.calls.upload[0]!.headers['content-type']).toContain('multipart/form-data');
+    expect(agent.calls.upload[0]!.headers[USER_HEADER]).toBe('dev');
+  });
+
+  it('rejects an over-sized upload with 413 without calling the agent', async () => {
+    const agent = fakeAgent();
+    const res = await request(buildApp(agent))
+      .post('/spaces/spc_test1/documents')
+      .set(USER_HEADER, 'dev')
+      .set('content-length', String(MAX_UPLOAD_BYTES + 1))
+      .set('content-type', 'multipart/form-data; boundary=xyz')
+      .send('ignored');
+
+    expect(res.status).toBe(413);
+    expect(ErrorBody.parse(res.body).status).toBe(413);
+    expect(agent.calls.upload).toHaveLength(0);
   });
 });
