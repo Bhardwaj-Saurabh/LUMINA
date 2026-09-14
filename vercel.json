@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "npm install",
+  "buildCommand": "npm run build -w @lumina/contract && npm run build -w @lumina/web",
+  "outputDirectory": "web/dist",
+  "framework": null,
+  "build": {
+    "env": {
+      "VITE_API_URL": "https://lumina-gateway-iwc6fhv5oa-nw.a.run.app"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/((?!assets/).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

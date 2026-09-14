@@ -12,7 +12,7 @@
 | **Current milestone** | M9 — OPEN at 15/16 caps (M10 ◐: deployed and serving, Vercel pending) |
 | **Blockers** | **`ttft p95` FAILS: 4666 ms against a 2500 ms gate** (client-side, latest deployed full bench; 2659 / 2686 / 4666 across three runs, 2032 / 2587 / 2910 agent-side). Cause measured, three candidate fixes rejected on their own numbers, no honest code change left — see "M9 — full bench run 3". |
 | **Last gates run** | 2026-09-14 11:00Z deployed full bench (`--target` the Cloud Run gateway): **15/16 caps, `pass:false`, exit 1** — everything green except `ttft p95`. Earlier the same day: eval ladder `--deploy-url` **stopped at Gate 2** on the same cap (Gates 0/1 pass). `quality/check.mjs .` 0 errors, 1 warning (A3), exit 1. |
-| **Deploy state** | **Live on Cloud Run** (europe-west2): `lumina-agent` IAM-gated, `lumina-gateway` public at `https://lumina-gateway-iwc6fhv5oa-nw.a.run.app`, CI/CD green end to end, evals report published and served. **Vercel UI pending** the owner's `npx vercel login`; the gateway serves the identical UI meanwhile. |
+| **Deploy state** | **Fully deployed.** Submitted URL: **https://lumina-theta-woad.vercel.app** (the provided UI, unmodified, built with `VITE_API_URL` = the gateway). Backends on Cloud Run europe-west2: `lumina-agent` IAM-gated, `lumina-gateway` public at `https://lumina-gateway-iwc6fhv5oa-nw.a.run.app`. CI/CD green end to end; evals report published and served. Verified from the Vercel origin end to end: preflight 204, then `trace → sources → token → done`. |
 
 ## Milestones
 
@@ -43,9 +43,22 @@ which is deep fan-out issuing one `web_search` per sub-question against a declar
 end to end (verify → candidate at no traffic → IAM smoke → promote → gateway → public smoke),
 Atlas indexes, the run-export → quality → build-report → publish chain, and
 `GET /evals/report.json` answering 200 with the strong ETag, `Cache-Control` and
-`X-Published-At`, 304 on revalidation, `/evals` rendering the real report. Open: (1) the eval
-ladder stops at Gate 2 on `ttft p95`, so "all gates" is not met; (2) the Vercel UI needs the
-owner's `npx vercel login` — the gateway serves the identical UI meanwhile.
+`X-Published-At`, 304 on revalidation, `/evals` rendering the real report. The UI is live on
+Vercel at **https://lumina-theta-woad.vercel.app** — the submitted URL — and a full answer
+streams over that exact path (preflight 204 with the origin echoed, then
+`trace → sources → token → done`); an unknown origin gets no `Access-Control-Allow-Origin`.
+
+Still open, and the reason M10 is not ✅: **the eval ladder stops at Gate 2 on `ttft p95`**, so
+"all gates" is not met.
+
+Vercel builds from the REPO ROOT via a new root `vercel.json`, not from `web/`: the UI depends on
+the `@lumina/contract` workspace, which must be built first, so `web/vercel.json` is not the
+config Vercel reads. Its SPA rewrite is mirrored verbatim in the root file — without it `/evals`
+404s on the hard refresh the grader uses. Two things the Vercel CLI did that needed undoing: it
+wrote `.env*` into `.gitignore`, which would have covered the tracked `.env.example` that Gate 0
+checks for (narrowed to `.env.local`), and `vercel git connect` needs a GitHub login connection
+on the Vercel account, so UI redeploys are `npx vercel deploy --prod` by hand. `web/` is
+untouched.
 
 ## Session log (append-only)
 
@@ -77,6 +90,8 @@ owner's `npx vercel login` — the gateway serves the identical UI meanwhile.
 | 2026-09-14 | **Deployed full bench ×3.** Run 1 14/16 (ttft 2659, `202 accept` 943 — Cloud Run's own logs said the server answered in 66–74 ms, so that one was the measuring laptop; CPU was 1.4–7.8 %, killing my contention hypothesis). Run 2 14/16 (202 back to 130 ✓, deep ratio 1.69 ✗). Run 3 **15/16** | 365 ✅ | 15/16, `pass:false` — only ttft ✗ | – | Hedging turn 1 rejected on its own numbers: 26 % of calls for 173 ms |
 | 2026-09-14 | **Deep gear made deeper per search**, not just wider: `SearchOptions{maxResults,depth}` port → Tavily → tool, chosen by gear in `runAsk`; cache keys on the shape so quick's rows never serve deep. Declined `search_depth:'advanced'` — 2 credits against a cost_model we may not edit that prices 1 | 365 ✅ | deep/quick source ratio 1.69x → **5.11x** ✅ | publish chain | The adapter had ignored the `opts.maxResults` its own port declared since day one |
 | 2026-09-14 | **Publish chain + gateway header relay**: 90 deployed runs exported → quality 0 errors/1 warning → report 82/85 automated → published. Verifying over HTTP found the gateway's JSON proxy discarding every upstream header, so the agent's ETag/`X-Published-At`/304 contract was dead in production despite passing agent tests | 422 ✅ | `/evals/report.json` 200 + strong ETag + 304 ✅ | Vercel (owner) | Red-line audit then caught the Status block still claiming "ttft p95 closed, blockers none" — corrected |
+| 2026-09-14 | **Vercel: the submitted URL is live** — https://lumina-theta-woad.vercel.app. Root `vercel.json` builds from the monorepo root (contract first) and mirrors the provided SPA rewrite; `web/` untouched. Gateway `CORS_ORIGINS` updated to admit the Vercel origin (CI only swaps images, so runtime env survives a deploy) | 422 ✅ | preflight 204 + full `trace→sources→token→done` from the Vercel origin ✅; unknown origin refused ✅ | `ttft p95` is the only open cap | Narrowed the `.env*` rule the Vercel CLI wrote into `.gitignore` — it would have covered the tracked `.env.example` |
+
 ### M7 findings — three bugs only a live run could surface
 
 1. **The rate limit was throttling the grader, not an abuser.** 30/min flat was tighter than

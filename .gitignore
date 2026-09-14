@@ -9,3 +9,9 @@ reports/
 *.log
 .DS_Store
 content/
+
+# Vercel project linkage and its OIDC token (local, per-machine).
+# NOT the `.env*` glob the Vercel CLI writes here by default: that would cover
+# `.env.example`, which is tracked on purpose and which Gate 0 checks for.
+.vercel/
+.env.local
