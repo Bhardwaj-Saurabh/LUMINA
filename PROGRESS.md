@@ -10,7 +10,7 @@
 | | |
 |---|---|
 | **Current milestone** | M9 — OPEN at 15/16 caps (M10 ◐: deployed and serving, Vercel pending) |
-| **Blockers** | **`ttft p95` FAILS: 4666 ms against a 2500 ms gate** (client-side, latest deployed full bench; 2659 / 2686 / 4666 across three runs, 2032 / 2587 / 2910 agent-side). Cause measured, three candidate fixes rejected on their own numbers, no honest code change left — see "M9 — full bench run 3". |
+| **Blockers** | **`ttft p95` FAILS: 4666 ms against a 2500 ms gate** (client-side, latest deployed full bench; 2659 / 2686 / 4666 across three runs). Transport is measured at ~107 ms from a laptop vs ~68 ms in-region, so this is REAL service latency, not a measurement artifact — two sequential model completions, ~1.9 s at p50. See "M9 — full bench run 3". |
 | **Last gates run** | 2026-09-14 11:00Z deployed full bench (`--target` the Cloud Run gateway): **15/16 caps, `pass:false`, exit 1** — everything green except `ttft p95`. Earlier the same day: eval ladder `--deploy-url` **stopped at Gate 2** on the same cap (Gates 0/1 pass). `quality/check.mjs .` 0 errors, 1 warning (A3), exit 1. |
 | **Deploy state** | **Fully deployed.** Submitted URL: **https://lumina-theta-woad.vercel.app** (the provided UI, unmodified, built with `VITE_API_URL` = the gateway). Backends on Cloud Run europe-west2: `lumina-agent` IAM-gated, `lumina-gateway` public at `https://lumina-gateway-iwc6fhv5oa-nw.a.run.app`. CI/CD green end to end; evals report published and served. Verified from the Vercel origin end to end: preflight 204, then `trace → sources → token → done`. |
 
@@ -91,6 +91,7 @@ untouched.
 | 2026-09-14 | **Deep gear made deeper per search**, not just wider: `SearchOptions{maxResults,depth}` port → Tavily → tool, chosen by gear in `runAsk`; cache keys on the shape so quick's rows never serve deep. Declined `search_depth:'advanced'` — 2 credits against a cost_model we may not edit that prices 1 | 365 ✅ | deep/quick source ratio 1.69x → **5.11x** ✅ | publish chain | The adapter had ignored the `opts.maxResults` its own port declared since day one |
 | 2026-09-14 | **Publish chain + gateway header relay**: 90 deployed runs exported → quality 0 errors/1 warning → report 82/85 automated → published. Verifying over HTTP found the gateway's JSON proxy discarding every upstream header, so the agent's ETag/`X-Published-At`/304 contract was dead in production despite passing agent tests | 422 ✅ | `/evals/report.json` 200 + strong ETag + 304 ✅ | Vercel (owner) | Red-line audit then caught the Status block still claiming "ttft p95 closed, blockers none" — corrected |
 | 2026-09-14 | **Vercel: the submitted URL is live** — https://lumina-theta-woad.vercel.app. Root `vercel.json` builds from the monorepo root (contract first) and mirrors the provided SPA rewrite; `web/` untouched. Gateway `CORS_ORIGINS` updated to admit the Vercel origin (CI only swaps images, so runtime env survives a deploy) | 422 ✅ | preflight 204 + full `trace→sources→token→done` from the Vercel origin ✅; unknown origin refused ✅ | `ttft p95` is the only open cap | Narrowed the `.env*` rule the Vercel CLI wrote into `.gitignore` — it would have covered the tracked `.env.example` |
+| 2026-09-14 | **Measured the client-side claim instead of asserting it** (user challenge: the laptop is not the client). Paired each request with its own agent-recorded `ttftMs` via a chosen `x-request-id`, 12 quick answers from the laptop vs 12 from a Cloud Run job in europe-west2: transport **107 ms** vs **68 ms** p50. My earlier "the gap is the laptop" claim was wrong — it had compared p95s of two different answer pools. `ttft p95` is REAL service latency. Also re-measured nano at n=30 (no win) | 422 ✅ | transport ~100 ms, immaterial | – | Probe job + image deleted after; Compute API left disabled (used Cloud Run Jobs instead of a VM) |
 
 ### M7 findings — three bugs only a live run could surface
 
@@ -364,10 +365,19 @@ of which said "do not build the thing you were about to build":
    a duplicate after H ms, keep the first to answer) is the textbook fix for a *rare* tail — but
    this body is merely WIDE, not spiky: H=1200 ms would fire on **26.3 %** of all calls to move
    turn-1 p95 by 173 ms, and H=800 ms on 68.4 %. Rejected on its own numbers, unbuilt.
-2. *Is another deployment faster?* (10 interleaved rounds per shape, so a slow minute hits both
-   equally.) gpt-5.4-mini decision p50 1361 / answer-first-delta p50 893 → modelled TTFT p50
-   2254 + tool time. gpt-5.4 "large" is worse on both: 2063 / 1605 → 3668. gpt-5.4-nano was
-   already measured 2.7× slower. Mini stays; there is no faster path on this account.
+2. *Is another deployment faster?* (Interleaved rounds per shape, so a slow minute hits both
+   equally.) gpt-5.4 "large" is worse on both shapes: decision p50 2063 vs mini's 1361,
+   answer-first-delta 1605 vs 893. gpt-5.4-**nano** was re-measured at n=30 after the throttling
+   fix, because the first "2.7× slower" reading had been taken while the SDK was silently
+   sleeping on `Retry-After` and was not trustworthy: decision turn **mini p50 1254 / p90 2040 /
+   p95 2421** vs **nano p50 1968 / p90 2320 / p95 2331**. Nano is 714 ms worse at the median and
+   a tie at the p95 the gate measures, and it threw a connection error mid-probe — no win.
+   Mini stays; there is no faster path on this account.
+
+   That probe also showed where the tail actually lives: mini's **answer-turn** first delta
+   (p95 2931) is as big a contributor as the decision turn (p95 2421). The answer turn is where
+   grounding and citations are produced, so it is not a place to put a smaller model — which is
+   why "use a smaller model" has no version left that helps.
 
 The honest conclusion: a **two-turn agent loop on this Azure deployment cannot reliably hold
 ttft p95 ≤ 2500 ms**. The floor is two sequential completions (~1.9 s p50, and a p95 set by
@@ -450,17 +460,30 @@ regression. Agent-side, quick answers only, 81 per run:
 
 - The search-shape change did **not** touch the quick path: turn-1 p50 is 676 / 686 / 697 across
   the three runs, tool time at p50 is 1 ms (cache hits).
-- The agent's own p95 was **2032 ms in run 1 — inside the 2500 ms target.** Client-observed for
-  the same runs: 2659 / 2686 / 4666. The client-minus-agent gap ran 627 ms in run 1 and 1756 ms
-  in run 3 — the same measuring-client variance that produced run 1's phantom 943 ms "202
-  accept" against a 70 ms server.
 - No retries fired in run 3 (`llm retry` absent from the logs), so no provider throttling either.
+- **CORRECTION (12:42Z).** An earlier version of this entry claimed the client-minus-agent gap
+  (627 ms in run 1, 1756 ms in run 3) was the measuring laptop's network. **That was wrong, and
+  the method was wrong.** It compared the bench's p95 over ITS 75-answer pool against an
+  agent-side p95 over a DIFFERENT 81-answer set pulled from Mongo — two populations, so the
+  difference between them is not transport and says nothing about the client.
 
-This does **not** earn a pass. The SLA is defined client-side through the gateway and that is the
-number that counts; `ttft p95` is recorded as FAILED on all three runs. But it locates the
-remaining gap outside the code: roughly 1.9 s of it is two sequential completions (the floor
-measured over 803 answers), and the rest is the public-internet path from the measuring laptop
-to europe-west2, which varies by more than a second between runs.
+  Measured properly instead, by pairing each request with its own recorded `ttftMs` via a
+  chosen `x-request-id`, 12 quick web answers per client, search cache warmed first for both:
+
+  | client | client p50 | client p95 | agent p50 | agent p95 | **transport** p50 / p95 |
+  |---|---|---|---|---|---|
+  | laptop (home connection) | 1714 | 2719 | 1609 | 2622 | **107 / 117** |
+  | Cloud Run job, europe-west2 (next to the gateway) | 1552 | 1814 | 1491 | 1756 | **68 / 76** |
+
+  Transport is ~107 ms from the laptop against ~68 ms from inside the region: a ~40 ms penalty,
+  not a second. **The laptop is a fair measuring client and `ttft p95` is a real service-latency
+  failure, not a measurement artifact.** The run-1 `202 accept` finding still stands on its own
+  evidence — Cloud Run's own per-request log said 66–74 ms server-side against 943 ms observed —
+  but that was one outlier request, and it must not be generalised into "the laptop is slow".
+
+`ttft p95` is recorded as FAILED on all three runs. With transport now measured at ~100 ms, the
+whole of the gap is the service: two sequential model completions, ~1.9 s at p50, with a p95 set
+by the provider's per-call spread.
 
 All three runs are archived as `reports/bench-full-run{1,2,3}.json` (`ranAt` 10:33:53Z /
 10:42:32Z / 11:00:24Z, `pass:false` on each) so the tables above are checkable rather than

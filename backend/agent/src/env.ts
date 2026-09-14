@@ -31,9 +31,14 @@ export const env = {
   azureEmbeddingDeployment: process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT ?? '',
   /**
    * Optional deployment for tool-selection turns only (empty = same as the chat deployment;
-   * answers, the planner and synthesis always use the chat deployment). Measured 2026-09-14
-   * with gpt-5.4-nano on this account: the decision turn got ~2.7x SLOWER (p50 847 → 2309 ms,
-   * p95 1333 → 6134) and issued duplicate tool calls — so this is opt-in, never defaulted.
+   * answers, the planner and synthesis always use the chat deployment).
+   *
+   * gpt-5.4-nano was measured for this twice. The first pass (~2.7x slower) was taken while
+   * Azure was silently throttling us with 30 s SDK retries, so it was not trustworthy. Re-run
+   * afterwards, 30 rounds interleaved so a slow minute hits both deployments equally:
+   * decision turn mini p50 1254 / p95 2421 vs nano p50 1968 / p95 2331. Nano is 714 ms worse
+   * at the median and a statistical tie at the p95 the SLA actually measures — and it threw a
+   * connection error mid-probe. So: no win, opt-in, never defaulted.
    * Priced at the chat model's rates when used (an overcount, in the honest direction).
    */
   azureResearchDeployment: process.env.LLM_RESEARCH_DEPLOYMENT ?? '',
