@@ -38,6 +38,16 @@ export const env = {
    */
   azureResearchDeployment: process.env.LLM_RESEARCH_DEPLOYMENT ?? '',
 
+  /**
+   * Our retry policy for provider calls; the SDK's own is disabled (providers/llm/retry.ts).
+   * `maxAttempts` counts the first try. The wait cap is deliberately far below the 30 s Azure
+   * asks for when it throttles: a throttled answer arriving ~4 s late is one sample near the
+   * TTFT p95, whereas honouring 30 s per turn produced a 66 s answer and a failed Gate 2 in the
+   * deployed run of 2026-09-14.
+   */
+  llmMaxAttempts: num(process.env.LLM_MAX_ATTEMPTS, 3),
+  llmRetryMaxWaitMs: num(process.env.LLM_RETRY_MAX_WAIT_MS, 4000),
+
   // Azure OpenAI pay-as-you-go list prices for gpt-5.4-mini (USD per MTok), declared
   // 2026-09-14 and mirrored in benchmark/sla.json cost_model — the two must agree or the
   // agent's done.costUsd and the bench's cost/answer tell different stories.

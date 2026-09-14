@@ -267,3 +267,40 @@ Federation pool `github` + provider `github-oidc` scoped to `Bhardwaj-Saurabh/LU
 `.github/workflows/{pr,deploy}.yml` (agent first, no traffic, IAM-authenticated smoke, promote,
 then gateway). Vercel: needs the owner's `npx vercel login`; the gateway serves the UI as the
 fallback submission URL.
+
+**Deployed eval run 1 (10:02Z) — Gate 2 FAIL: `ttft p95 66259ms`, `answer p95 67226ms`.**
+Everything else on that run was green (grounding 1.0, error rate 0, recall@5 3/3, cost
+$0.0026/quick, ordering ok, 0 dangling). Diagnosed from the agent's own timings rather than
+guessed: two of the nine answers were throttled — one at `ttftMs 35416` (`turn1Ms 32441`, turn 2
+first delta 2974) and one at `ttftMs 66166`, which paid it on BOTH turns (`turn1Ms 32888`, turn 2
+first delta 33277) and so set the p95 on its own. Every one of those turns reports `toolsMs: 0`:
+a turn that does ~1 s of work taking 32 s is a sleep, not a slow model. Cause: the openai SDK
+(`node_modules/openai/core.js:138`, `:447`) retries twice by
+default and honours Azure's `Retry-After: 30`, **inside** `completions.create`, with a sleep
+that ignores the abort signal — so neither the request budget nor the tool deadline could see
+or stop it, and the run log showed only "a slow LLM turn". A direct probe of the deployment
+during the diagnosis (four back-to-back completions with the SDK out of the way, reading
+`x-ratelimit-*` off the response) showed the quota healthy — 150 RPM / 150k TPM, 149 requests
+remaining, `abusepenalty-active False`, 0.7–2.4 s per call — and the bench runs the smoke web
+workload at concurrency 1 (`benchmark/bench.mjs:286`), so the throttle was shared-subscription
+pressure on the Azure deployment, not our load. It is therefore expected to recur, at a time we
+do not choose: the fix has to bound the damage rather than prevent the 429.
+
+Fix (`providers/llm/retry.ts`, 12 tests): SDK retries off (`maxRetries: 0`); the policy is ours
+and is **bounded** (cap `LLM_RETRY_MAX_WAIT_MS`, default 4000 — we decline Azure's 30 s),
+**abortable** (the backoff loses the race to the request's signal), and **visible** (`onRetry`
+→ a `llm retry` warn line with status, wait and reason). Non-transient statuses (400/401/403/
+404/422) are not retried at all, an exhausted retry rethrows the provider's error untouched
+(A1: a 502 with the real reason, never a plausible substitute), and only *opening* a stream is
+retried — once deltas have been yielded a retry would replay tokens the client already has.
+The same treatment went to the embeddings adapter, which had the identical SDK default and runs
+*before* the first token (memory recall, RAG retrieval) — a throttled embedding call could have
+burned 30 s inside TTFT with the chat path already fixed. Its port stays signal-free; bounding
+is the part that matters there.
+
+Trade-off, recorded as a prediction to be checked, not a result: a throttled answer should now
+arrive ~4 s late instead of 66 s — one sample near the TTFT p95 instead of a blown gate — and if
+every attempt is throttled the answer fails loudly instead of arriving a minute later. Note that
+4000 ms is itself over the 2500 ms TTFT target by construction: a retried turn is a slow turn,
+the point is only that it is now a *bounded* one. **Gate 2 has not been re-run at the time of
+writing; the next entry carries the measured number.**

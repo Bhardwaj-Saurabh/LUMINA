@@ -18,13 +18,25 @@ import type {
   ToolCallRequest,
   TurnStream
 } from './port.js';
+import { withRetry, type RetryAttempt, type RetryPolicy } from './retry.js';
 
 export interface AzureOpenAiConfig {
   endpoint: string;
   apiKey: string;
   apiVersion: string;
   chatDeployment: string;
+  /** Absent ⇒ DEFAULT_RETRY. Never the SDK's own retry — see retry.ts for why. */
+  retry?: RetryPolicy;
+  /** Composition root logs these; a throttled turn must be visible, not just slow. */
+  onRetry?: (info: RetryAttempt) => void;
 }
+
+/**
+ * One extra attempt after a short, capped wait. Chosen against the SLA, not against the
+ * provider's `Retry-After`: a throttled answer that arrives ~4 s late costs one sample near the
+ * TTFT p95, where sleeping out Azure's 30 s cost 66 s and a failed gate.
+ */
+const DEFAULT_RETRY: RetryPolicy = { maxAttempts: 3, maxWaitMs: 4000 };
 
 const toOpenAiMessages = (system: string, messages: LlmMessage[]): ChatCompletionMessageParam[] => {
   const out: ChatCompletionMessageParam[] = [{ role: 'system', content: system }];
@@ -77,20 +89,35 @@ export function makeAzureOpenAiLlm(cfg: AzureOpenAiConfig): LlmPort {
   const client = new AzureOpenAI({
     endpoint: cfg.endpoint,
     apiKey: cfg.apiKey,
-    apiVersion: cfg.apiVersion
+    apiVersion: cfg.apiVersion,
+    // The SDK's retry sleeps for Azure's `Retry-After` (30 s), inside the call, un-abortably.
+    // retry.ts does it bounded, cancellable and logged instead.
+    maxRetries: 0
   });
+  const policy = cfg.retry ?? DEFAULT_RETRY;
+  const attempt = <T>(input: RunTurnInput, fn: () => Promise<T>): Promise<T> =>
+    withRetry(fn, {
+      policy,
+      ...(input.signal ? { signal: input.signal } : {}),
+      ...(cfg.onRetry ? { onRetry: cfg.onRetry } : {})
+    });
 
   return {
     async runTurn(input: RunTurnInput): Promise<RunTurnResult> {
-      const completion = await client.chat.completions.create(
-        {
-          model: input.model ?? cfg.chatDeployment,
-          messages: toOpenAiMessages(input.system, input.messages),
-          ...(input.tools.length > 0
-            ? { tools: toOpenAiTools(input.tools), tool_choice: input.toolChoice ?? ('auto' as const) }
-            : {})
-        },
-        input.signal ? { signal: input.signal } : undefined
+      const completion = await attempt(input, () =>
+        client.chat.completions.create(
+          {
+            model: input.model ?? cfg.chatDeployment,
+            messages: toOpenAiMessages(input.system, input.messages),
+            ...(input.tools.length > 0
+              ? {
+                  tools: toOpenAiTools(input.tools),
+                  tool_choice: input.toolChoice ?? ('auto' as const)
+                }
+              : {})
+          },
+          input.signal ? { signal: input.signal } : undefined
+        )
       );
       const choice = completion.choices[0];
       if (!choice) throw new Error('azure openai returned no choices');
@@ -117,17 +144,24 @@ export function makeAzureOpenAiLlm(cfg: AzureOpenAiConfig): LlmPort {
 
       const stream = (async function* () {
         try {
-          const events = await client.chat.completions.create(
-            {
-              model: input.model ?? cfg.chatDeployment,
-              messages: toOpenAiMessages(input.system, input.messages),
-              stream: true,
-              stream_options: { include_usage: true },
-              ...(input.tools.length > 0
-                ? { tools: toOpenAiTools(input.tools), tool_choice: input.toolChoice ?? ('auto' as const) }
-                : {})
-            },
-            input.signal ? { signal: input.signal } : undefined
+          // Only OPENING the stream is retried. Once deltas have been yielded a retry would
+          // replay tokens the client already has, so a mid-stream failure stays a failure.
+          const events = await attempt(input, () =>
+            client.chat.completions.create(
+              {
+                model: input.model ?? cfg.chatDeployment,
+                messages: toOpenAiMessages(input.system, input.messages),
+                stream: true,
+                stream_options: { include_usage: true },
+                ...(input.tools.length > 0
+                  ? {
+                      tools: toOpenAiTools(input.tools),
+                      tool_choice: input.toolChoice ?? ('auto' as const)
+                    }
+                  : {})
+              },
+              input.signal ? { signal: input.signal } : undefined
+            )
           );
           // Tool-call ids and argument JSON arrive in fragments keyed by `index`.
           const partials = new Map<number, { id: string; name: string; args: string }>();

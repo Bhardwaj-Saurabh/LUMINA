@@ -41,13 +41,19 @@ const llm = makeAzureOpenAiLlm({
   endpoint: env.azureOpenaiEndpoint,
   apiKey: secrets.azureOpenai,
   apiVersion: env.azureOpenaiApiVersion,
-  chatDeployment: env.azureChatDeployment || env.llmModel
+  chatDeployment: env.azureChatDeployment || env.llmModel,
+  retry: { maxAttempts: env.llmMaxAttempts, maxWaitMs: env.llmRetryMaxWaitMs },
+  // A throttled turn is the difference between a 2 s answer and a 6 s one: it belongs in the
+  // log by name, not hidden inside a turn that merely looks slow.
+  onRetry: (info) => log.warn(info, 'llm retry')
 });
 const embeddings = makeAzureOpenAiEmbeddings({
   endpoint: env.azureOpenaiEndpoint,
   apiKey: secrets.azureOpenai,
   apiVersion: env.azureOpenaiApiVersion,
-  deployment: env.azureEmbeddingDeployment || env.embeddingModel
+  deployment: env.azureEmbeddingDeployment || env.embeddingModel,
+  retry: { maxAttempts: env.llmMaxAttempts, maxWaitMs: env.llmRetryMaxWaitMs },
+  onRetry: (info) => log.warn(info, 'embeddings retry')
 });
 const memories = makeMemoriesRepo(database);
 const spaces = makeSpacesRepo(database);
