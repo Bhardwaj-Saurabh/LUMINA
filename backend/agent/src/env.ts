@@ -39,13 +39,6 @@ export const env = {
   azureResearchDeployment: process.env.LLM_RESEARCH_DEPLOYMENT ?? '',
 
   /**
-   * Our retry policy for provider calls; the SDK's own is disabled (providers/llm/retry.ts).
-   * `maxAttempts` counts the first try. The wait cap is deliberately far below the 30 s Azure
-   * asks for when it throttles: a throttled answer arriving ~4 s late is one sample near the
-   * TTFT p95, whereas honouring 30 s per turn produced a 66 s answer and a failed Gate 2 in the
-   * deployed run of 2026-09-14.
-   */
-  /**
    * What makes the deep gear deeper PER SEARCH, not just wider. Quick keeps the provider's
    * cheap defaults (5 results, 'basic'); deep asks for more results and Tavily's own deeper
    * crawl. Added after the full bench of 2026-09-14 measured a deep answer at 1.69x the
@@ -62,6 +55,13 @@ export const env = {
   deepSearchMaxResults: num(process.env.DEEP_SEARCH_MAX_RESULTS, 10),
   deepSearchDepth: (process.env.DEEP_SEARCH_DEPTH ?? 'basic') as 'basic' | 'advanced',
 
+  /**
+   * Our retry policy for provider calls; the SDK's own is disabled (providers/llm/retry.ts).
+   * `maxAttempts` counts the first try. The wait cap is deliberately far below the 30 s Azure
+   * asks for when it throttles: a throttled answer arriving ~4 s late is one sample near the
+   * TTFT p95, whereas honouring 30 s per turn produced a 66 s answer and a failed Gate 2 in the
+   * deployed run of 2026-09-14.
+   */
   llmMaxAttempts: num(process.env.LLM_MAX_ATTEMPTS, 3),
   llmRetryMaxWaitMs: num(process.env.LLM_RETRY_MAX_WAIT_MS, 4000),
 

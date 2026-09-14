@@ -9,14 +9,14 @@
 
 | | |
 |---|---|
-| **Current milestone** | M9 full bench green |
-| **Blockers** | none. ttft p95 closed 2026-09-14 (3060 → 2354 ms on smoke) — see "TTFT investigation" |
-| **Last gates run** | 2026-09-14 `bench --smoke` via :8787 **✓ bench passed, exit 0** — first fully green smoke: 4/4 probes, 5/5 web, 4/4 indexed (202 in 124–199 ms), recall@5 3/3, grounding 17/17, **ttft p95 2354 ms** (gate 2500), answer p95 2628, cost $0.0009/answer |
-| **Deploy state** | not deployed |
+| **Current milestone** | M9 — OPEN at 15/16 caps (M10 ◐: deployed and serving, Vercel pending) |
+| **Blockers** | **`ttft p95` FAILS: 4666 ms against a 2500 ms gate** (client-side, latest deployed full bench; 2659 / 2686 / 4666 across three runs, 2032 / 2587 / 2910 agent-side). Cause measured, three candidate fixes rejected on their own numbers, no honest code change left — see "M9 — full bench run 3". |
+| **Last gates run** | 2026-09-14 11:00Z deployed full bench (`--target` the Cloud Run gateway): **15/16 caps, `pass:false`, exit 1** — everything green except `ttft p95`. Earlier the same day: eval ladder `--deploy-url` **stopped at Gate 2** on the same cap (Gates 0/1 pass). `quality/check.mjs .` 0 errors, 1 warning (A3), exit 1. |
+| **Deploy state** | **Live on Cloud Run** (europe-west2): `lumina-agent` IAM-gated, `lumina-gateway` public at `https://lumina-gateway-iwc6fhv5oa-nw.a.run.app`, CI/CD green end to end, evals report published and served. **Vercel UI pending** the owner's `npx vercel login`; the gateway serves the identical UI meanwhile. |
 
 ## Milestones
 
-Legend: ☐ not started · 🔨 in progress · ✅ done (EDD proof recorded)
+Legend: ☐ not started · 🔨 in progress · ◐ partly done (some gates open — never a hedged ✅) · ✅ done (EDD proof recorded)
 
 | ID | Scope | TDD surface | EDD proof (gate / bench caps) | Status |
 |----|-------|-------------|-------------------------------|--------|
@@ -30,7 +30,22 @@ Legend: ☐ not started · 🔨 in progress · ✅ done (EDD proof recorded)
 | M7 | RAG: spaces, upload 202 <300 ms, jobs worker (lease+sweeper), pdfjs page-aware parse, chunk+locators, embed, hybrid RRF, read-your-write probe, `search_documents`, mode router | chunker/locator, RRF, jobState, ingest-pipeline, retrieve, docTools, spaces routes, upload route (98 tests) | 2026-09-13 `bench --smoke`: `accept202` 202 in 120–152 ms ✓ · `indexedViaWorker` 4/4 ✓ · `pageLocator` ✓ · `routerPicksDocs` ✓ (live: mode=auto reached for the Space) · recall@5 3/3 smoke, **39/39 = 1.000 over the full gold set** ✓ · grounding 1.0, 0 dangling | ✅ |
 | M8 | Deep search: plan-first, concurrency-3 fan-out, merge/renumber, subQuestion tags, DEEP_DAILY_CAP 429 + resetsAt, quick-never-escalates, `/stats` | planner validation, deepCap ledger, deep orchestrator w/ fake ports, deep+stats routes (41 tests) | 2026-09-13 live via :8787 — `deepPlan`: plan is frame 0, 6 sub-questions, plan in **1867 ms** (gate 4000) ✓ · `deepAttribution`: every retrieval step and all 22 sources tagged, numbering contiguous ✓ · `deepReadsMore`: 22 vs 5 distinct = **4.4x** (gate 2.0) ✓ · `deepBudget`: $0.0062 (gate 0.35), 7 steps (gate 24) ✓ · `deepCap429`: 6th deep → 429 with `resetsAt`, quick unaffected ✓ · `quickNeverEscalates`: no `plan_research` in any quick trace ✓ · `/stats` contract-valid | ✅ |
 | M9 | Full local proof: bench exit 0 vs sla.json; quality exit ≤ 1; failing trajectory in `runs/failing/`; `/stats` route; `sla.json` `cost_model` re-declared with real Azure rates. **Carries the one open SLA item: ttft p95** | regression tests for every gate failure found | `node benchmark/bench.mjs` exit 0 · `node quality/check.mjs .` exit ≤ 1 | ☐ |
-| M10 | Containerize (2 Dockerfiles), Cloud Run deploy (agent IAM-gated), Vercel UI, indexes on Atlas, deployed eval, report published, `/evals` renders | image smoke (USER node, ports, worker supervision) | `eval/eval.mjs --deploy-url` all gates; `/evals` on the Vercel URL renders the real report | ☐ |
+| M10 | Containerize (2 Dockerfiles), Cloud Run deploy (agent IAM-gated), Vercel UI, indexes on Atlas, deployed eval, report published, `/evals` renders | image smoke (USER node, ports, worker supervision) | `eval/eval.mjs --deploy-url` all gates; `/evals` on the Vercel URL renders the real report | ◐ |
+
+**M9 ☐ — 15/16 caps.** Only `ttft p95` is open (2659 / 2686 / 4666 client-side across three
+deployed runs; 2032 / 2587 / 2910 agent-side). Cause measured, fixes rejected with numbers, no
+honest code change left. `quality/check.mjs .` exits 1 (0 errors, 1 warning: A3 tool thrash,
+which is deep fan-out issuing one `web_search` per sub-question against a declared cap of 4 —
+`quality/` is a provided folder and the cap stays).
+
+**M10 ◐ — deployed and serving; two items open.** Done and verified live: both images, Cloud Run
+`lumina-agent` (IAM-gated, `--no-allow-unauthenticated`) + `lumina-gateway` (public), CI/CD green
+end to end (verify → candidate at no traffic → IAM smoke → promote → gateway → public smoke),
+Atlas indexes, the run-export → quality → build-report → publish chain, and
+`GET /evals/report.json` answering 200 with the strong ETag, `Cache-Control` and
+`X-Published-At`, 304 on revalidation, `/evals` rendering the real report. Open: (1) the eval
+ladder stops at Gate 2 on `ttft p95`, so "all gates" is not met; (2) the Vercel UI needs the
+owner's `npx vercel login` — the gateway serves the identical UI meanwhile.
 
 ## Session log (append-only)
 
@@ -339,7 +354,7 @@ from the critical path — i.e. hardcoding retrieve-then-generate instead of let
 decide — which SPEC forbids and which is the opposite of what this assignment grades. Recorded
 as a measured constraint; the threshold is not touched and the gate is reported as failed.
 
-### M9 — full bench against the deployment, run 1 (10:26Z) — 14/16 caps
+### M9 — full bench against the deployment, run 1 (ran 10:25–10:34Z) — 14/16 caps
 
 First full bench ever run against the deployed stack. **Failed on two caps**, everything else
 green: recall@5 30/30, cache hit 97.5 %, grounding 0.981 (211/215 verifiable, 0 dangling), error
@@ -361,7 +376,7 @@ Both remaining failures are therefore dominated by variance outside the service 
 client network). Re-running once on that evidence — not to fish for a better draw, and this run
 stands recorded either way.
 
-### M9 — full bench run 2 (11:12Z) — 14/16 caps, and a DIFFERENT pair
+### M9 — full bench run 2 (ran 10:37–10:43Z) — 14/16 caps, and a DIFFERENT pair
 
 | cap | run 1 | run 2 |
 |---|---|---|
@@ -396,7 +411,7 @@ a file we may not edit, prices one credit per search. Using it would make every 
 cost under-report the real spend. Breadth was the half that was free and honest; the knob
 (`DEEP_SEARCH_DEPTH`) stays for a deploy that declares its own rates.
 
-### M9 — full bench run 3 (10:53Z, after the search-shape fix) — 15/16 caps
+### M9 — full bench run 3 (ran 10:53–11:00Z, after the search-shape fix) — 15/16 caps
 
 The fix did what it was built to do: **deep/quick source ratio 1.69× → 5.11×** (min across four
 deep answers; 41–66 sources each against 22 before), deep sub-questions min 5, deep cost
@@ -425,6 +440,36 @@ remaining gap outside the code: roughly 1.9 s of it is two sequential completion
 measured over 803 answers), and the rest is the public-internet path from the measuring laptop
 to europe-west2, which varies by more than a second between runs.
 
+All three runs are archived as `reports/bench-full-run{1,2,3}.json` (`ranAt` 10:33:53Z /
+10:42:32Z / 11:00:24Z, `pass:false` on each) so the tables above are checkable rather than
+transcribed. `reports/` is git-ignored, so these live only on the machine that ran them.
+
 **M9 stands at 15/16 caps, bench exit 1.** Not closed. The one open cap has a measured cause, a
 rejected-with-numbers list of fixes (hedging, a faster deployment, more CPU), and no code change
 left that would honestly move it.
+
+### M10 — the publish chain, run end to end against the deployment (11:03Z)
+
+`exportRuns` pulled 90 deployed runs out of Mongo (with `depth`, which the provided exporter
+drops) → `quality/check.mjs .` **0 errors, 1 warning, exit 1** → `build-report.mjs` **82/85
+automated**, 15 points left to a human grader → `publishReport.js` stored it as the active
+artifact (etag `fa5bad40…`).
+
+Verifying that over HTTP found the last bug of the session, and it was ours. The gateway's JSON
+proxy answered with `res.status(...).json(body)`, discarding every header the agent set — and
+the agent client never captured headers for JSON responses at all. So the caching contract the
+agent's own tests pin (strong ETag over the published artifact, `X-Published-At`, 304
+revalidation) was **dead on arrival in the deployed stack**: the browser got Express's weak ETag
+and no provenance. Tested behaviour that never happens in production is worse than no behaviour,
+so: relay an allowlist (not a copy — the gateway re-serializes the body, so the agent's
+`content-length` and framing describe a payload that no longer exists), forward `If-None-Match`
+upstream so the agent answers 304 itself, and relay a 304 as a 304 with no body. 4 new tests.
+
+Verified live after the deploy:
+
+```
+etag: "fa5bad40570f55fff0297da57dff01c4"     ← ours, not Express's weak one
+cache-control: no-cache
+x-published-at: 2026-09-14T11:03:09.326Z
+If-None-Match → 304
+```
