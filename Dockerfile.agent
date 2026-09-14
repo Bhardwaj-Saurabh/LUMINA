@@ -1,0 +1,50 @@
+# syntax=docker/dockerfile:1
+# LUMINA agent — ARCHITECTURE.md §7. Build context is the REPO ROOT: the services import
+# @lumina/contract through the npm-workspace symlink, so the image is assembled as the same
+# monorepo layout and the runtime keeps it — env.ts resolves `../../runs` from its own cwd.
+#
+# The jobs worker is not a separate image: index.js supervises dist/worker.js as a child
+# process (workerSupervisor.ts), which is why this service runs with instance-based billing
+# (--no-cpu-throttling) and min 1 instance — a polling loop must not be frozen between requests.
+
+# ---- deps: every manifest in the install graph, nothing else, for a cacheable npm ci -------
+FROM node:20-slim AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY packages/contract/package.json packages/contract/
+COPY backend/agent/package.json backend/agent/
+RUN npm ci --workspace @lumina/contract --workspace @lumina/agent --include-workspace-root
+
+# ---- build: contract first (the services import its dist), then the agent -------------------
+FROM deps AS build
+# Every workspace tsconfig extends the root base; without it tsc falls back to ES3 targets.
+COPY tsconfig.base.json ./
+COPY packages/contract packages/contract
+COPY backend/agent backend/agent
+RUN npm run build -w @lumina/contract && npm run build -w @lumina/agent
+
+# ---- prod-deps: the same graph without devDependencies ---------------------------------------
+FROM node:20-slim AS prod-deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY packages/contract/package.json packages/contract/
+COPY backend/agent/package.json backend/agent/
+RUN npm ci --workspace @lumina/contract --workspace @lumina/agent --include-workspace-root --omit=dev
+
+# ---- runtime ---------------------------------------------------------------------------------
+FROM node:20-slim AS runtime
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=prod-deps /app/node_modules ./node_modules
+COPY --from=build /app/packages/contract/package.json packages/contract/package.json
+COPY --from=build /app/packages/contract/dist packages/contract/dist
+COPY --from=build /app/backend/agent/package.json backend/agent/package.json
+COPY --from=build /app/backend/agent/dist backend/agent/dist
+# runs/<requestId>.json is written on every answer; on Cloud Run this is tmpfs and Mongo's
+# `runs` collection is the durable copy — but an unwritable directory would fail the ask path.
+RUN mkdir -p /app/runs && chown -R node:node /app
+USER node
+WORKDIR /app/backend/agent
+# Cloud Run injects PORT; env.ts honours it (PORT_AGENT ?? PORT).
+EXPOSE 8080
+CMD ["node", "dist/index.js"]

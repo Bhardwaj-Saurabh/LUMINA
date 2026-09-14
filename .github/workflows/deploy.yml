@@ -1,0 +1,101 @@
+# Deploy — ARCHITECTURE.md §8: GitHub Actions → Workload Identity Federation (no JSON keys)
+# → Artifact Registry → Cloud Run, agent first with no traffic, smoke-gated promotion, then
+# the gateway. Runtime env vars and secrets are configured on the services themselves
+# (one-time, see PROGRESS.md M10); a deploy only swaps the image, so nothing sensitive
+# lives in this file or in GitHub.
+name: deploy
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+concurrency: { group: deploy, cancel-in-progress: false }
+
+env:
+  PROJECT: all-thing-agentic-505911
+  REGION: europe-west2
+  REGISTRY: europe-west2-docker.pkg.dev/all-thing-agentic-505911/lumina
+
+permissions:
+  contents: read
+  id-token: write   # the OIDC token WIF exchanges for a short-lived GCP credential
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - run: npm run build -w @lumina/contract
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+
+  build-push:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/630908588763/locations/global/workloadIdentityPools/github/providers/github-oidc
+          service_account: lumina-deploy@all-thing-agentic-505911.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
+      - uses: docker/setup-buildx-action@v3
+      - name: build + push agent
+        run: |
+          docker buildx build --platform linux/amd64 -f Dockerfile.agent \
+            -t ${REGISTRY}/agent:${GITHUB_SHA} -t ${REGISTRY}/agent:latest --push .
+      - name: build + push gateway
+        run: |
+          docker buildx build --platform linux/amd64 -f Dockerfile.gateway \
+            -t ${REGISTRY}/gateway:${GITHUB_SHA} -t ${REGISTRY}/gateway:latest --push .
+
+  deploy:
+    needs: build-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/630908588763/locations/global/workloadIdentityPools/github/providers/github-oidc
+          service_account: lumina-deploy@all-thing-agentic-505911.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+      # A second, ID-token credential for the deploy SA itself (it holds run.invoker on the
+      # agent): gcloud's impersonated identity tokens are not accepted by Cloud Run.
+      - id: agent-token
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/630908588763/locations/global/workloadIdentityPools/github/providers/github-oidc
+          service_account: lumina-deploy@all-thing-agentic-505911.iam.gserviceaccount.com
+          token_format: id_token
+          id_token_audience: https://lumina-agent-iwc6fhv5oa-nw.a.run.app
+          id_token_include_email: true
+
+      # Agent first, no traffic: the gateway keeps talking to the previous revision until the
+      # candidate has proven it can reach Mongo and its providers.
+      - name: deploy agent candidate (no traffic)
+        run: |
+          gcloud run deploy lumina-agent --project $PROJECT --region $REGION \
+            --image ${REGISTRY}/agent:${GITHUB_SHA} --no-traffic --tag candidate --quiet
+      - name: smoke agent candidate (IAM-authenticated)
+        run: |
+          URL=$(gcloud run services describe lumina-agent --project $PROJECT --region $REGION --format='value(status.url)')
+          CAND=$(echo "$URL" | sed 's#https://#https://candidate---#')
+          BODY=$(curl -sf -H "Authorization: Bearer ${{ steps.agent-token.outputs.id_token }}" "$CAND/health")
+          echo "$BODY"; echo "$BODY" | grep -q '"db":"ok"'
+      - name: promote agent
+        run: gcloud run services update-traffic lumina-agent --project $PROJECT --region $REGION --to-latest --quiet
+
+      - name: deploy gateway
+        run: |
+          gcloud run deploy lumina-gateway --project $PROJECT --region $REGION \
+            --image ${REGISTRY}/gateway:${GITHUB_SHA} --quiet
+      - name: smoke gateway (public)
+        run: |
+          URL=$(gcloud run services describe lumina-gateway --project $PROJECT --region $REGION --format='value(status.url)')
+          curl -sf "$URL/health" | grep -q '"db":"ok"'
+          # The contract's one public route must answer without a user header, and never 401.
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$URL/evals/report.json")" != "401"

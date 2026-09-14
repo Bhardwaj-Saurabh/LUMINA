@@ -75,6 +75,12 @@ export interface AgentAppDeps {
   admitDeep?(userId: string): Promise<DeepAdmission>;
   /** Absent until wired: `/stats` stays 501 rather than reporting zeroes that look real. */
   stats?(userId: string): Promise<StatsResponse>;
+  /**
+   * The published evals report (ARCHITECTURE §8.1): a READ of an operator-published
+   * artifact, never a computation. Public by contract (ROUTES marks it auth:false) — the UI's
+   * /evals page and the grader both fetch it without a user.
+   */
+  evalsReport?: { get(): Promise<{ json: unknown; etag: string; publishedAt: string } | null> };
 }
 
 type Handler = (req: express.Request, res: express.Response) => Promise<void>;
@@ -193,6 +199,27 @@ export function makeAgentApp(deps: AgentAppDeps): express.Express {
     }
   };
 
+  const evalsReport = deps.evalsReport;
+  if (evalsReport) {
+    handlers['GET /evals/report.json'] = async (req, res) => {
+      const report = await evalsReport.get();
+      if (!report) {
+        // Unpublished is a clear state — never an empty report that looks like a bad score.
+        res.status(404).json(errorBody(404, 'no evals report has been published yet'));
+        return;
+      }
+      const etag = `"${report.etag}"`;
+      res.setHeader('ETag', etag);
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('X-Published-At', report.publishedAt);
+      if (req.header('if-none-match') === etag) {
+        res.status(304).end();
+        return;
+      }
+      res.status(200).json(report.json);
+    };
+  }
+
   const stats = deps.stats;
   if (stats) {
     handlers['GET /stats'] = async (_req, res) => {
@@ -281,7 +308,6 @@ export function makeAgentApp(deps: AgentAppDeps): express.Express {
     : {};
 
   for (const route of ROUTES) {
-    if (route.path === '/evals/report.json') continue; // published artifact, later milestone
     const method = route.method.toLowerCase() as 'get' | 'post' | 'delete';
     const key = `${route.method} ${route.path}`;
     const handler =

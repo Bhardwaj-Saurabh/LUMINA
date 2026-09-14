@@ -100,7 +100,12 @@ export function makeAgentClient({
 
   return {
     async health() {
-      const res = await doFetch(`${root}/health`, { signal: AbortSignal.timeout(3000) });
+      // The one call that used to go out without the IAM token — against a gated agent the
+      // gateway's own health proxy would have 403'd, and /health would have read "agent down".
+      const res = await doFetch(`${root}/health`, {
+        headers: await authHeaders(),
+        signal: AbortSignal.timeout(3000)
+      });
       return HealthResponse.parse(await res.json());
     },
 

@@ -1,0 +1,22 @@
+# Build context is the repo root; keep it to what the images compile from.
+node_modules
+**/node_modules
+dist
+**/dist
+web/dist
+.env
+.env.*
+!.env.example
+runs
+reports
+content
+*.log
+.git
+.github
+.claude
+docs
+benchmark
+eval
+quality
+scripts
+*.md

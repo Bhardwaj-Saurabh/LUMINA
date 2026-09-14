@@ -5,7 +5,10 @@ import { resolve } from 'node:path';
 config({ path: resolve(process.cwd(), '../../.env') });
 config({ path: resolve(process.cwd(), '.env') });
 
+// An EMPTY variable is "unset", not zero: Number('') is 0, which is finite, and a port of 0
+// means "listen somewhere random" — found while smoke-testing the container image.
 const num = (v: string | undefined, fallback: number) => {
+  if (v === undefined || v.trim() === '') return fallback;
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 };

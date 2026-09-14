@@ -27,6 +27,7 @@ import { makeChunksRepo } from './repos/chunks.js';
 import { makeJobsRepo } from './repos/jobs.js';
 import { makeDeepUsageStore } from './repos/deepUsage.js';
 import { makeStatsReader } from './repos/stats.js';
+import { makeReportsRepo } from './repos/reports.js';
 import { admitDeep } from './core/deep/deepCap.js';
 import { makeFileBucket } from './infra/gridfs.js';
 import { superviseWorker } from './workerSupervisor.js';
@@ -78,6 +79,7 @@ const app = makeAgentApp({
   admitDeep: (userId) =>
     admitDeep({ userId, now: Date.now(), cap: env.deepDailyCap, store: deepUsage }),
   stats: makeStatsReader(database, { deepDailyCap: env.deepDailyCap, deepUsage }),
+  evalsReport: makeReportsRepo(database),
   uploadDocument: makeUploadDocumentHandler({
     spaces,
     documents,

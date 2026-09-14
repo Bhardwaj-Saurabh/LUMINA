@@ -10,6 +10,7 @@ import { existsSync } from 'node:fs';
 import { REQUEST_HEADER, USER_HEADER } from '@lumina/contract';
 import { makeGatewayApp } from './app.js';
 import { makeRateLimit } from './middleware/rateLimit.js';
+import { makeMetadataIdToken } from './proxy/idToken.js';
 import { makeAgentClient } from './proxy/client.js';
 import { env } from './env.js';
 
@@ -23,7 +24,12 @@ const isExpensive = (req: { method: string; path: string }): boolean =>
 const log = pino({ level: env.logLevel });
 
 const app = makeGatewayApp({
-  agent: makeAgentClient({ baseUrl: env.agentUrl }),
+  agent: makeAgentClient({
+    baseUrl: env.agentUrl,
+    // Cloud Run: the agent is --no-allow-unauthenticated and only this service account may
+    // invoke it. The token seam is the one place the deployment's trust boundary shows.
+    ...(env.agentAudience ? { idToken: makeMetadataIdToken({ audience: env.agentAudience }) } : {})
+  }),
   rateLimit: makeRateLimit({
     perMinute: env.rateLimitPerMinute,
     burst: RATE_LIMIT_BURST,

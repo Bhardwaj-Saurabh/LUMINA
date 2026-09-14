@@ -1,0 +1,49 @@
+# syntax=docker/dockerfile:1
+# LUMINA gateway — ARCHITECTURE.md §7. Build context is the REPO ROOT (see Dockerfile.agent).
+# Differs from the agent image in three ways: it also builds the UI so the gateway can serve
+# `web/dist` for same-origin use, it needs web's manifests in the install graph for that, and
+# it holds NO provider keys — it talks to the agent with a Cloud Run IAM ID token.
+#
+# The Vercel-hosted UI (the submitted URL) is a SEPARATE build with VITE_API_URL set to the
+# public gateway; the copy baked in here is built with VITE_API_URL="" (same origin).
+
+FROM node:20-slim AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY packages/contract/package.json packages/contract/
+COPY backend/gateway/package.json backend/gateway/
+COPY web/package.json web/
+RUN npm ci --workspace @lumina/contract --workspace @lumina/gateway --workspace @lumina/web --include-workspace-root
+
+FROM deps AS build
+ARG VITE_API_URL=""
+ENV VITE_API_URL=${VITE_API_URL}
+# Every workspace tsconfig extends the root base; without it tsc falls back to ES3 targets.
+COPY tsconfig.base.json ./
+COPY packages/contract packages/contract
+COPY backend/gateway backend/gateway
+COPY web web
+RUN npm run build -w @lumina/contract && npm run build -w @lumina/gateway && npm run build -w @lumina/web
+
+FROM node:20-slim AS prod-deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY packages/contract/package.json packages/contract/
+COPY backend/gateway/package.json backend/gateway/
+RUN npm ci --workspace @lumina/contract --workspace @lumina/gateway --include-workspace-root --omit=dev
+
+FROM node:20-slim AS runtime
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=prod-deps /app/node_modules ./node_modules
+COPY --from=build /app/packages/contract/package.json packages/contract/package.json
+COPY --from=build /app/packages/contract/dist packages/contract/dist
+COPY --from=build /app/backend/gateway/package.json backend/gateway/package.json
+COPY --from=build /app/backend/gateway/dist backend/gateway/dist
+# env.ts resolves `../../web/dist` from its cwd; the static handler is only mounted if it exists.
+COPY --from=build /app/web/dist web/dist
+RUN chown -R node:node /app
+USER node
+WORKDIR /app/backend/gateway
+EXPOSE 8080
+CMD ["node", "dist/index.js"]

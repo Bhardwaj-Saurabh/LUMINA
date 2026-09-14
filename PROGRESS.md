@@ -240,3 +240,30 @@ p95 worse (4715); the nano run itself left four more failed runs (3 × `read ECO
 that are preserved in `runs/failing/` — a "faster model" is a hypothesis to measure, not a fact.
 A3 note, precisely: one deep run made 7 consecutive searches with 6 sub-questions, so at least
 one sub-question searched twice; still fan-out, not a retry loop, and still a warning.
+
+### M10 (2026-09-14) — in progress
+
+Built and verified locally: `Dockerfile.agent` / `Dockerfile.gateway` (multi-stage, repo-root
+context, monorepo layout preserved; both workspaces now build with `tsconfig.build.json` so
+tests stay out of `dist`), `.dockerignore`. Both containers pass a local smoke: `/health` ok,
+the gateway serves `/` and `/evals` from `web/dist`, `/evals/report.json` is an honest 404
+until published (never 401), `/memory` 401 without a user, and one real question streams
+trace → sources → token → done across the two containers. Found on the way: `num('')` was 0
+(a port of 0), so an empty env var now reads as unset in both services.
+
+Code for the deployed shape: agent `GET /evals/report.json` reads the operator-published
+artifact (`repos/reports.ts`, versioned, ETag, 304); `ops/publishReport.ts` validates a built
+report against the contract's `EvalsReport` before storing it; `ops/exportRuns.ts` pulls the
+deployed run logs out of Mongo WITH `depth` (the provided exporter drops it, and is a red
+line). Gateway mints Cloud Run IAM ID tokens from the metadata server (`proxy/idToken.ts`,
+cached to 60 s before `exp`, in-flight deduped, fails loud) when `AGENT_AUDIENCE` is set —
+and `health()` now carries the token too; it was the one hop that did not, and would have
+403'd against the gated agent. 15 new tests; 397 total (344 agent + 53 gateway).
+
+GCP one-time setup done: Artifact Registry `lumina` (europe-west2), service accounts
+`lumina-agent` / `lumina-gateway` / `lumina-deploy`, Secret Manager `MONGODB_URI`,
+`AZURE_OPENAI_KEY`, `TAVILY_API_KEY` (agent SA is the only accessor), Workload Identity
+Federation pool `github` + provider `github-oidc` scoped to `Bhardwaj-Saurabh/LUMINA`,
+`.github/workflows/{pr,deploy}.yml` (agent first, no traffic, IAM-authenticated smoke, promote,
+then gateway). Vercel: needs the owner's `npx vercel login`; the gateway serves the UI as the
+fallback submission URL.

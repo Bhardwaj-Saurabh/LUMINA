@@ -1,0 +1,22 @@
+# PR gate — ARCHITECTURE.md §8. Everything the grader's Gate 0/1 runs, before a merge:
+# contract build, typecheck, lint, tests, and the quality kit's contract rule (C1).
+name: pr
+on:
+  pull_request:
+  push:
+    branches-ignore: [master]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - run: npm run build -w @lumina/contract
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      # runs/ and reports/ are not in git, so only the contract rule is checkable here;
+      # exit 1 (warnings) is acceptable, exit 2 (an error) is not.
+      - run: node quality/check.mjs . || test $? -le 1
