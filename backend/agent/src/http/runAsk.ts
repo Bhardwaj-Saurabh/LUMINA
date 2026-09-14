@@ -8,7 +8,7 @@
  * sub-question registries are built from the same tool factories over a `taggedSink`, which
  * is why deep attribution needs no cooperation from the tools themselves.
  */
-import { writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { lookup } from 'node:dns/promises';
 import { newId, type SourcesEvent, type DoneEvent, type ThreadMessage } from '@lumina/contract';
@@ -293,6 +293,9 @@ export function makeRunAsk(deps: RunAskDeps) {
       requestId,
       writeFile: async (path, content) => {
         void path; // builder computes runs/<requestId>.json relative; we anchor at env.runsDir
+        // The directory is normally created at startup; a fresh checkout (CI found this) or a
+        // host that never ran index.ts must not fail an answer over a missing folder.
+        await mkdir(env.runsDir, { recursive: true });
         await writeFile(join(env.runsDir, `${requestId}.json`), content, 'utf8');
       },
       upsert: (doc) => deps.runs.upsert(doc)
