@@ -395,3 +395,36 @@ costs two credits where `max_results` costs none extra — and `benchmark/sla.js
 a file we may not edit, prices one credit per search. Using it would make every declared deep
 cost under-report the real spend. Breadth was the half that was free and honest; the knob
 (`DEEP_SEARCH_DEPTH`) stays for a deploy that declares its own rates.
+
+### M9 — full bench run 3 (10:53Z, after the search-shape fix) — 15/16 caps
+
+The fix did what it was built to do: **deep/quick source ratio 1.69× → 5.11×** (min across four
+deep answers; 41–66 sources each against 22 before), deep sub-questions min 5, deep cost
+$0.0141 against a $0.35 cap. `202 accept p95 146ms`. Only `ttft p95` misses, at 4666 ms.
+
+That number needed explaining rather than accepting, and the explanation is measurement, not
+regression. Agent-side, quick answers only, 81 per run:
+
+| run | ttft p50 | ttft p95 | turn1 p50 | turn1 p95 | tools p95 | 3-turn shape | web cache-miss |
+|---|---|---|---|---|---|---|---|
+| 1 | 1392 | **2032** | 676 | 1017 | 256 | 1.2 % | 2/50 |
+| 2 | 1492 | 2587 | 686 | 1077 | 480 | 4.9 % | 4/50 |
+| 3 | 1461 | 2910 | 697 | 1263 | 331 | 3.7 % | 4/50 |
+
+- The search-shape change did **not** touch the quick path: turn-1 p50 is 676 / 686 / 697 across
+  the three runs, tool time at p50 is 1 ms (cache hits).
+- The agent's own p95 was **2032 ms in run 1 — inside the 2500 ms target.** Client-observed for
+  the same runs: 2659 / 2686 / 4666. The client-minus-agent gap ran 627 ms in run 1 and 1756 ms
+  in run 3 — the same measuring-client variance that produced run 1's phantom 943 ms "202
+  accept" against a 70 ms server.
+- No retries fired in run 3 (`llm retry` absent from the logs), so no provider throttling either.
+
+This does **not** earn a pass. The SLA is defined client-side through the gateway and that is the
+number that counts; `ttft p95` is recorded as FAILED on all three runs. But it locates the
+remaining gap outside the code: roughly 1.9 s of it is two sequential completions (the floor
+measured over 803 answers), and the rest is the public-internet path from the measuring laptop
+to europe-west2, which varies by more than a second between runs.
+
+**M9 stands at 15/16 caps, bench exit 1.** Not closed. The one open cap has a measured cause, a
+rejected-with-numbers list of fixes (hedging, a faster deployment, more CPU), and no code change
+left that would honestly move it.

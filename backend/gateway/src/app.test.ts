@@ -389,3 +389,74 @@ describe('gateway document upload', () => {
     expect(agent.calls.upload).toHaveLength(0);
   });
 });
+
+// ------------------------------------------------- upstream response headers
+
+/**
+ * The JSON proxy used to answer with `res.status(...).json(body)`, which throws away every
+ * header the agent set. That made the agent's `/evals/report.json` caching contract — a strong
+ * ETag over the published artifact, `X-Published-At`, and the 304 revalidation the agent tests
+ * pin — dead on arrival in the deployed stack: the browser saw Express's own weak ETag and no
+ * provenance at all. Found on the deployed gateway, 2026-09-14.
+ */
+describe('gateway JSON proxy — caching and provenance headers survive the hop', () => {
+  const reportHeaders = {
+    etag: '"fa5bad40570f55fff0297da57dff01c4"',
+    'cache-control': 'no-cache',
+    'x-published-at': '2026-09-14T11:05:00.000Z'
+  };
+
+  it('passes the agent ETag, Cache-Control and X-Published-At through to the caller', async () => {
+    const agent = fakeAgent({
+      json: () => ({ status: 200, body: { assignment: 'lumina' }, headers: reportHeaders })
+    });
+
+    const res = await request(buildApp(agent)).get('/evals/report.json');
+
+    expect(res.status).toBe(200);
+    expect(res.headers.etag).toBe(reportHeaders.etag);
+    expect(res.headers['cache-control']).toBe('no-cache');
+    expect(res.headers['x-published-at']).toBe(reportHeaders['x-published-at']);
+  });
+
+  it('forwards If-None-Match upstream so the agent can answer 304 itself', async () => {
+    const agent = fakeAgent({ json: () => ({ status: 200, body: {}, headers: reportHeaders }) });
+
+    await request(buildApp(agent))
+      .get('/evals/report.json')
+      .set('If-None-Match', reportHeaders.etag);
+
+    expect(agent.calls.json[0]!.headers['if-none-match']).toBe(reportHeaders.etag);
+  });
+
+  it('relays a 304 as a 304 with no body', async () => {
+    const agent = fakeAgent({
+      json: () => ({ status: 304, body: undefined, headers: { etag: reportHeaders.etag } })
+    });
+
+    const res = await request(buildApp(agent))
+      .get('/evals/report.json')
+      .set('If-None-Match', reportHeaders.etag);
+
+    expect(res.status).toBe(304);
+    expect(res.text).toBeFalsy();
+  });
+
+  it('does not leak hop-by-hop or length headers that would corrupt the re-serialized body', async () => {
+    // The gateway re-encodes the JSON, so the agent's content-length is a lie here.
+    const agent = fakeAgent({
+      json: () => ({
+        status: 200,
+        body: { ok: true },
+        headers: { 'content-length': '999999', connection: 'close', etag: '"keep-me"' }
+      })
+    });
+
+    const res = await request(buildApp(agent)).get('/evals/report.json');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(res.headers.etag).toBe('"keep-me"');
+    expect(res.headers['content-length']).not.toBe('999999');
+  });
+});

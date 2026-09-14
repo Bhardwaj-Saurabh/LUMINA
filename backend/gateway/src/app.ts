@@ -53,7 +53,38 @@ const forwardedHeaders = (req: express.Request, res: express.Response): Record<s
   const headers: Record<string, string> = { [REQUEST_HEADER]: requestIdOf(res) };
   const userId = req.header(USER_HEADER);
   if (userId) headers[USER_HEADER] = userId;
+  // Conditional-request headers belong to the agent, which owns the artifact and its ETag.
+  const ifNoneMatch = req.header('if-none-match');
+  if (ifNoneMatch) headers['if-none-match'] = ifNoneMatch;
   return headers;
+};
+
+/**
+ * Response headers worth relaying from the agent. An allowlist, not a copy: the gateway
+ * re-serializes the body, so the agent's content-length and transfer framing describe a
+ * payload that no longer exists. Caching validators and provenance, though, are the agent's
+ * to state — `/evals/report.json` answers with a strong ETag over the published artifact and
+ * an `X-Published-At`, and dropping them left the browser with Express's own weak ETag and no
+ * provenance (found on the deployed gateway, 2026-09-14).
+ */
+const RELAYED_RESPONSE_HEADERS = [
+  'etag',
+  'cache-control',
+  'x-published-at',
+  'last-modified',
+  'expires',
+  'vary'
+] as const;
+
+const relayHeaders = (
+  res: express.Response,
+  upstream: Record<string, string> | undefined
+): void => {
+  if (!upstream) return;
+  for (const name of RELAYED_RESPONSE_HEADERS) {
+    const value = upstream[name];
+    if (value !== undefined) res.setHeader(name, value);
+  }
 };
 
 const queryOf = (req: express.Request): Record<string, string> =>
@@ -134,6 +165,12 @@ export function makeGatewayApp(deps: GatewayAppDeps): express.Express {
         ...(method === 'GET' ? {} : { body: req.body }),
         ...(Object.keys(query).length > 0 ? { query } : {})
       });
+      relayHeaders(res, upstream.headers);
+      // 304 carries no body by definition; `.json()` would set a content-type for nothing.
+      if (upstream.status === 304) {
+        res.status(304).end();
+        return;
+      }
       res.status(upstream.status).json(upstream.body);
     };
 

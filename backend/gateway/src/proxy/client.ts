@@ -14,7 +14,16 @@ export type AgentJsonRequest = {
   query?: Record<string, string>;
 };
 
-export type AgentJsonResponse = { status: number; body: unknown };
+export type AgentJsonResponse = {
+  status: number;
+  body: unknown;
+  /**
+   * The agent's own response headers. The gateway relays an allowlist of them (ETag,
+   * Cache-Control, X-Published-At) so the artifact routes keep their caching contract across
+   * the hop; optional so a test double need not invent any.
+   */
+  headers?: Record<string, string>;
+};
 
 export type AgentAskRequest = {
   threadId: string;
@@ -124,7 +133,11 @@ export function makeAgentClient({
       });
       // Upstream status is mapped verbatim, never normalised.
       const text = await res.text();
-      return { status: res.status, body: text ? (JSON.parse(text) as unknown) : {} };
+      return {
+        status: res.status,
+        body: text ? (JSON.parse(text) as unknown) : {},
+        headers: headersToObject(res.headers)
+      };
     },
 
     async ask(req) {
