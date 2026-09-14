@@ -175,7 +175,8 @@ export function scriptedLlm(
     system: input.system,
     messages: [...input.messages],
     tools: [...input.tools],
-    toolChoice: input.toolChoice ?? 'auto'
+    toolChoice: input.toolChoice ?? 'auto',
+    ...(input.model !== undefined ? { model: input.model } : {})
   });
 
   const resultOf = (turn: Exclude<ScriptedTurn, { throws: Error }>): RunTurnResult => {

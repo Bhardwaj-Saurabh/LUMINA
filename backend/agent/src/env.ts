@@ -26,11 +26,20 @@ export const env = {
   azureChatDeployment:
     process.env.AZURE_OPENAI_CHAT_DEPLOYMENT ?? process.env.AZURE_OPENAI_MINI_DEPLOYMENT ?? '',
   azureEmbeddingDeployment: process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT ?? '',
+  /**
+   * Optional deployment for tool-selection turns only (empty = same as the chat deployment;
+   * answers, the planner and synthesis always use the chat deployment). Measured 2026-09-14
+   * with gpt-5.4-nano on this account: the decision turn got ~2.7x SLOWER (p50 847 → 2309 ms,
+   * p95 1333 → 6134) and issued duplicate tool calls — so this is opt-in, never defaulted.
+   * Priced at the chat model's rates when used (an overcount, in the honest direction).
+   */
+  azureResearchDeployment: process.env.LLM_RESEARCH_DEPLOYMENT ?? '',
 
-  // PLACEHOLDER rates (USD per MTok) — set your provider's published prices before
-  // trusting any dollar figure; sla.json's cost_model must be re-declared to match.
-  llmInputUsdPerMtok: num(process.env.LLM_INPUT_USD_PER_MTOK, 0.25),
-  llmOutputUsdPerMtok: num(process.env.LLM_OUTPUT_USD_PER_MTOK, 2.0),
+  // Azure OpenAI pay-as-you-go list prices for gpt-5.4-mini (USD per MTok), declared
+  // 2026-09-14 and mirrored in benchmark/sla.json cost_model — the two must agree or the
+  // agent's done.costUsd and the bench's cost/answer tell different stories.
+  llmInputUsdPerMtok: num(process.env.LLM_INPUT_USD_PER_MTOK, 0.75),
+  llmOutputUsdPerMtok: num(process.env.LLM_OUTPUT_USD_PER_MTOK, 4.5),
 
   // Reserved so a cap can never starve the answer itself (ARCHITECTURE §3.1).
   synthesisAllowanceMs: num(process.env.SYNTHESIS_ALLOWANCE_MS, 15000),
@@ -79,6 +88,12 @@ export const env = {
    * cold-web TTFT p50 3465 → 2431 ms, and a join is honestly counted as a cache miss.
    */
   searchPrefetch: (process.env.SEARCH_PREFETCH ?? '1') === '1',
+  /**
+   * Thread messages prepended to a request, most recent first. Unbounded, the grader's
+   * 40-question thread grew every request's prompt 6k → 14k tokens and four concurrent
+   * requests tripped the deployment's tokens-per-minute quota (8/40 answers died as 429s).
+   */
+  historyMaxMessages: num(process.env.HISTORY_MAX_MESSAGES, 8),
   /** Chars of each search result's content shown to the model (the citation snippet stays short). */
   searchResultModelChars: num(process.env.SEARCH_RESULT_MODEL_CHARS, 1500),
 

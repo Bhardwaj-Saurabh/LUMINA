@@ -20,6 +20,7 @@ import { runDeep } from '../core/deep/orchestrator.js';
 import { planResearch } from '../core/deep/planner.js';
 import { makeWebSearchTool, makeFetchPageTool } from '../core/tools/webTools.js';
 import { makeRecallMemoryTool, makeSaveMemoryTool } from '../core/tools/memoryTools.js';
+import { mayStateFactAboutUser } from '../core/tools/memoryGate.js';
 import { makeSearchDocumentsTool } from '../core/tools/docTools.js';
 import { retrieveChunks, type ChunkSearchPort } from '../core/rag/retrieve.js';
 import { createRunLog } from '../obs/runlog.js';
@@ -105,8 +106,10 @@ export function makeRunAsk(deps: RunAskDeps) {
       deps.messages.listByThread(threadId),
       deps.memories.hasAny(userId)
     ]);
+    // A bounded window of the most recent turns: follow-ups need context, not the transcript.
     const history: LlmMessage[] = threadMessages
       .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .slice(-env.historyMaxMessages)
       .map((m) => ({ role: m.role, content: m.content }));
 
     // The router (SPEC 5.4 "Should"): `mode` decides which retrieval surfaces EXIST for this
@@ -164,15 +167,19 @@ export function makeRunAsk(deps: RunAskDeps) {
     const registry = new ToolRegistry();
     for (const tool of retrievalTools(collector)) registry.register(tool);
     // Memory is available in both gears; userId/threadId are request-scoped, never model input.
-    registry.register(
-      makeSaveMemoryTool({
-        embeddings: deps.embeddings,
-        memories: deps.memories,
-        userId,
-        threadId,
-        now
-      })
-    );
+    // save_memory only when the message could carry a statement about the user (memoryGate.ts):
+    // offered on a bare question, the model invents one — measured, three times.
+    if (mayStateFactAboutUser(body.query)) {
+      registry.register(
+        makeSaveMemoryTool({
+          embeddings: deps.embeddings,
+          memories: deps.memories,
+          userId,
+          threadId,
+          now
+        })
+      );
+    }
     // Offered only when there is something to recall (TTFT): to a user with no memories the
     // tool can only return [], and measured live it cost ~400-500 ms of output tokens on the
     // decision turn — or a whole extra round trip when the model called it INSTEAD of
@@ -183,17 +190,16 @@ export function makeRunAsk(deps: RunAskDeps) {
       );
     }
 
-    // Speculative search (TTFT): a fresh web question almost always becomes web_search with
-    // the user's own wording (the prompt asks for exactly that), and today that search waits
-    // for LLM turn 1 to finish before it starts. Start it now, into the cache layer only; the
+    // Speculative search (TTFT): a web question almost always becomes web_search with the
+    // user's own wording (the prompt asks for exactly that), and that search used to wait for
+    // LLM turn 1 to finish before it started. Start it now, into the cache layer only; the
     // model's identical call joins the in-flight promise. It cannot mint a source (it never
     // touches the collector), cannot count as a cache hit (a join is a miss), and a failure
     // here is not a request failure — it surfaces, if at all, through the model's own call.
+    // Thread history does not disable it: the model searches the CURRENT question verbatim
+    // either way, and the grader asks all 40 web questions in one thread.
     const prefetchable =
-      env.searchPrefetch &&
-      !deep &&
-      history.length === 0 &&
-      (body.mode === 'web' || (body.mode === 'auto' && !docsAvailable));
+      env.searchPrefetch && !deep && (body.mode === 'web' || (body.mode === 'auto' && !docsAvailable));
     if (prefetchable) cachedSearch.prewarm(body.query);
 
     const runlog = createRunLog({ depth: body.depth, now });
@@ -201,6 +207,7 @@ export function makeRunAsk(deps: RunAskDeps) {
     let answerText = '';
     let sources: SourcesEvent = [];
     let doneEvent: DoneEvent | undefined;
+    let lastError: string | undefined;
     // Observe the stream to build the evidence trail; the sink still owns transport.
     const recording: AskEmitter = {
       plan: (d) => emitter.plan(d),
@@ -221,7 +228,12 @@ export function makeRunAsk(deps: RunAskDeps) {
         doneEvent = d;
         emitter.done(d);
       },
-      error: (d) => emitter.error(d)
+      error: (d) => {
+        // The frame goes to the client; the TEXT must also land server-side, or a 502 is
+        // undiagnosable from the agent log (9 bench runs said only `terminated: "error"`).
+        lastError = d.error;
+        emitter.error(d);
+      }
     };
 
     const answerId = newId('ans');
@@ -236,7 +248,8 @@ export function makeRunAsk(deps: RunAskDeps) {
       answerId,
       model: env.llmModel,
       price,
-      searchCached: () => cachedSearch.stats().allHits
+      searchCached: () => cachedSearch.stats().allHits,
+      ...(env.azureResearchDeployment ? { researchModel: env.azureResearchDeployment } : {})
     };
 
     const outcome = deep
@@ -300,7 +313,8 @@ export function makeRunAsk(deps: RunAskDeps) {
       ttftMs: doneEvent?.ttftMs ?? null,
       searchCached: doneEvent?.searchCached ?? false,
       mode: body.mode,
-      timings: outcome.timings ?? null
+      timings: outcome.timings ?? null,
+      ...(lastError !== undefined ? { error: lastError } : {})
     });
 
     // §10: one line per answer, keyed by the same requestId the gateway logged, so a single
@@ -322,7 +336,8 @@ export function makeRunAsk(deps: RunAskDeps) {
         mode: body.mode,
         // Phase attribution (core/timings.ts): where ttftMs went. Off the contract, on the log.
         timings: outcome.timings ?? null,
-        prefetch: cachedSearch.stats().prefetch
+        prefetch: cachedSearch.stats().prefetch,
+        ...(lastError !== undefined ? { error: lastError } : {})
       },
       'answer'
     );

@@ -33,12 +33,13 @@
   },
 
   "cost_model": {
-    "llm_provider": "anthropic",
-    "llm_model": "claude-sonnet-5",
-    "input_usd_per_mtok": 3.0,
-    "output_usd_per_mtok": 15.0,
-    "embedding_model": "text-embedding-3-small",
-    "embedding_usd_per_mtok": 0.02,
+    "_declared": "2026-09-14 by the learner: Azure OpenAI pay-as-you-go list prices (gpt-5.4-mini $0.75/$4.50 per MTok in/out, verified 2026-08-06; text-embedding-3-large $0.13/MTok) and Tavily pay-as-you-go $0.008 per basic-search credit. These replace the scaffold's placeholder Anthropic rates; backend/agent/src/env.ts defaults match.",
+    "llm_provider": "azure-openai",
+    "llm_model": "gpt-5.4-mini",
+    "input_usd_per_mtok": 0.75,
+    "output_usd_per_mtok": 4.5,
+    "embedding_model": "text-embedding-3-large",
+    "embedding_usd_per_mtok": 0.13,
     "search_usd_per_call": 0.008,
     "monthly_answer_volume": 100000,
     "monthly_deep_fraction": 0.1

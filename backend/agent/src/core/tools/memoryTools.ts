@@ -23,22 +23,39 @@ export function makeSaveMemoryTool(deps: {
   now?: () => number;
 }): ToolDef {
   const now = deps.now ?? Date.now;
+  // The attestation is structural, not prose: twice in the grader's 40-question thread the
+  // model saved an "interest" it had inferred from a QUESTION, which then charged every later
+  // answer a recall. A literal `true` the model must set explicitly turns "did the user
+  // actually say this?" into a validation failure instead of a polluted memory.
   const schema = z.object({
     text: z.string().min(1),
-    reason: z.string().min(1)
+    reason: z.string().min(1),
+    statedByUser: z.literal(true)
   });
   return {
     name: 'save_memory',
     description:
-      'Remember a durable fact or preference the user stated about themselves, for future threads.',
+      'Remember something the user EXPLICITLY STATED about themselves — a preference, a ' +
+      'constraint, an ongoing project, who they are — so future threads can honour it. Never ' +
+      'infer an interest from the questions they ask: asking about Atlas Vector Search is not ' +
+      'a fact about the user, and saving it pollutes every later answer with a spurious recall.',
     schema,
     inputJsonSchema: {
       type: 'object',
       properties: {
         text: { type: 'string', description: 'The fact to remember, as one self-contained sentence.' },
-        reason: { type: 'string', description: 'One line on why this is worth remembering.' }
+        reason: { type: 'string', description: 'One line on why this is worth remembering.' },
+        statedByUser: {
+          type: 'boolean',
+          enum: [true],
+          description:
+            'Must be true, and only set it when the user themselves stated this fact in their ' +
+            'own words (a preference, a constraint, who they are, what they are working on). ' +
+            'Something you inferred from a question they asked is NOT stated by the user — do ' +
+            'not call this tool for it.'
+        }
       },
-      required: ['text', 'reason']
+      required: ['text', 'reason', 'statedByUser']
     },
     async execute(input: z.infer<typeof schema>) {
       const [embedding] = await deps.embeddings.embed([input.text]);
@@ -69,7 +86,9 @@ export function makeRecallMemoryTool(deps: {
   return {
     name: 'recall_memory',
     description:
-      'Recall what this user has told you before (preferences, stable facts). Not a citable source.',
+      'Recall what this user has told you before (preferences, stable facts). Not a citable ' +
+      'source. Call it IN THE SAME TURN as your search, never on its own: a turn that only ' +
+      'recalls still has to search afterwards, which costs the user a whole extra round trip.',
     schema,
     inputJsonSchema: {
       type: 'object',

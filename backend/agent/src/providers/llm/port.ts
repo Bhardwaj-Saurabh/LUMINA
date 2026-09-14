@@ -57,6 +57,12 @@ export interface RunTurnInput {
   tools: LlmToolSpec[];
   /** Defaults to 'auto'. Meaningless — and never sent — when `tools` is empty. */
   toolChoice?: LlmToolChoice;
+  /**
+   * Deployment/model override for THIS turn; the adapter's configured model otherwise. Lets
+   * a turn that cannot answer (tool selection) run on a smaller, faster deployment while the
+   * answer keeps the configured one.
+   */
+  model?: string;
   /** Deadline propagation (§3.1): a hung provider call must not outlive the request budget. */
   signal?: AbortSignal;
 }

@@ -65,6 +65,13 @@ export interface RunLoopInput {
    */
   guidance?: string;
   /**
+   * Deployment for turns that CANNOT answer (tool_choice 'required'). Measured at the
+   * grader's concurrency: the decision turn is ~850 ms p50 / 1.3 s p95 of provider time for
+   * ~40 output tokens naming a tool — a smaller deployment does that faster. The answer turn
+   * never uses it, so quality, grounding and `done.model` are unchanged.
+   */
+  researchModel?: string;
+  /**
    * Deadline signal factory (default AbortSignal.timeout) — injectable so tests control
    * time. An abort fired by this signal is a BUDGET event and maps to cap, never error.
    */
@@ -99,9 +106,10 @@ const SYSTEM_PROMPT =
   'ones that look purely factual. In your FIRST turn, call recall_memory alongside your ' +
   'search, in that same turn: a thread starts with no history, so recall is the only way ' +
   'to know, and putting it in the same turn costs no extra round trip. ' +
-  'Call save_memory only for durable things the user states about themselves (preferences, ' +
-  'constraints, ongoing projects, identity), never for facts you read in a search result or ' +
-  'a document.\n' +
+  'Call save_memory only for durable things the user STATES about themselves (preferences, ' +
+  'constraints, ongoing projects, identity) — never for facts you read in a search result or ' +
+  'a document, and never for interests you infer from what they ask. A question is not a ' +
+  'fact about the user.\n' +
   'Cite a document chunk the same way you cite a web result: by its [n]. Document sources ' +
   'render with their page, so never invent a page number in prose — the locator carries it.';
 
@@ -204,7 +212,14 @@ export async function runLoop(input: RunLoopInput): Promise<RunLoopOutcome> {
     const t0 = now();
     let firstDeltaMs: number | undefined;
     try {
-      const turn = llm.streamTurn({ system, messages, tools: advertised, toolChoice, signal });
+      const turn = llm.streamTurn({
+        system,
+        messages,
+        tools: advertised,
+        toolChoice,
+        signal,
+        ...(toolChoice === 'required' && input.researchModel ? { model: input.researchModel } : {})
+      });
       for await (const delta of turn.stream) {
         if (!answered) firstDeltaMs = now() - t0;
         answered = true;

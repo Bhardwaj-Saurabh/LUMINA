@@ -57,6 +57,8 @@ export interface RunDeepInput {
   planner: (query: string) => Promise<PlanEvent>;
   /** Sub-questions in flight at once. Three balances wall-clock against provider limits. */
   concurrency?: number;
+  /** Deployment for the per-sub-question research turns (see RunLoopInput.researchModel). */
+  researchModel?: string;
   makeSignal?: (ms: number) => AbortSignal;
 }
 
@@ -196,7 +198,8 @@ export async function runDeep(input: RunDeepInput): Promise<RunDeepOutcome> {
         messages,
         tools,
         toolChoice: 'required',
-        signal
+        signal,
+        ...(input.researchModel ? { model: input.researchModel } : {})
       });
       // A research turn should not speak; anything it says here is drained and discarded
       // rather than leaked into the answer, which has not begun streaming yet. The stream

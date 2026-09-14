@@ -998,3 +998,42 @@ describe('runLoop timings', () => {
     expect(outcome.timings?.turns.map((t) => t.toolCalls)).toEqual([['recall_memory'], ['web_search'], []]);
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// n. A FASTER DEPLOYMENT FOR THE DECISION TURN — the answer model is untouched
+// ---------------------------------------------------------------------------
+
+describe('runLoop research model override', () => {
+  /**
+   * Measured at the grader's concurrency (4): the decision turn is ~850 ms p50 / 1.3 s p95 of
+   * pure provider time for ~40 output tokens that name a tool and a query. A smaller
+   * deployment does that faster. The ANSWER turn keeps the configured model — quality,
+   * grounding and the reported `done.model` are unchanged — so the override applies only to
+   * turns that cannot answer (tool_choice 'required').
+   */
+  it('sends the research model on required turns and no override on the turn that may answer', async () => {
+    const h = harness([
+      { toolCalls: [{ id: 'c1', name: 'web_search', input: { query: 'lumina', reason: 'r' } }] },
+      { deltas: ['Grounded answer [1]'] }
+    ]);
+
+    await runLoop(loopInput(h, { researchModel: 'gpt-5.4-nano' }) as never);
+
+    expect(h.llm.streamTurnCalls[0]?.toolChoice).toBe('required');
+    expect(h.llm.streamTurnCalls[0]?.model).toBe('gpt-5.4-nano');
+    expect(h.llm.streamTurnCalls[1]?.toolChoice).toBe('auto');
+    expect(h.llm.streamTurnCalls[1]?.model).toBeUndefined();
+  });
+
+  it('sends no model override anywhere when none is configured', async () => {
+    const h = harness([
+      { toolCalls: [{ id: 'c1', name: 'web_search', input: { query: 'lumina', reason: 'r' } }] },
+      { deltas: ['Grounded answer [1]'] }
+    ]);
+
+    await runLoop(loopInput(h) as never);
+
+    expect(h.llm.streamTurnCalls.every((c) => c.model === undefined)).toBe(true);
+  });
+});

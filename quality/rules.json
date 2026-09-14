@@ -9,7 +9,7 @@
       "severity": "error",
       "rule": "Every budget is a positive number, every ratio threshold is within 0 to 1, and every declared file path exists.",
       "precedent": [
-        "TODO \u2014 record the first time a stale or impossible threshold wasted a run."
+        "2026-09-13 LUMINA: the gateway's declared rate limit (30 req/min flat) was incompatible with the declared benchmark workload (40 web + 30 doc queries at concurrency 4, plus document-status polling every 1.2 s). The first full recall@5 run collected 12 x 429 before anyone noticed the two declarations could not both hold; the limiter was re-declared weighted (answer 5, poll 1) at 600/min. Earlier the same week an impossible AZURE_OPENAI_API_VERSION=2026-03-17 in .env made every provider call 404 and wasted the first live run (runs/failing/req_mtxxvg54uhxigd.json)."
       ],
       "selfCheck": "Could this expectations file pass under any possible run? If a threshold is above 1.0 or a path is missing, no.",
       "params": {}
@@ -33,7 +33,7 @@
       "severity": "error",
       "rule": "Every run ends with terminated='done'. A run ending at an iteration or token cap is a failure even when the final answer is right.",
       "precedent": [
-        "TODO \u2014 record the first run that hit a cap and still looked successful."
+        "2026-09-13 LUMINA: runs/failing/req_d3fb21d7-6bd.json — web_search hung 229.5 s when the Mongo pool reset; the request streamed its first token 230 s into a 90 s quick gear and finished with a plausible answer. It self-reported terminated='cap' and sat in runs/ failing A2 until it was moved to runs/failing/. The M2 fix had bounded LLM turns only; tool dispatch was still unbounded (also runs/failing/req_mtxy8h693vl8og.json, a 295 s provider turn)."
       ],
       "selfCheck": "Why did this loop stop? If the answer is 'it ran out', the agent did not work.",
       "params": {}
@@ -45,7 +45,7 @@
       "severity": "warn",
       "rule": "No tool is called more than maxConsecutiveSameTool times in a row without an intervening different call.",
       "precedent": [
-        "TODO \u2014 record the first retry loop that burned budget without progress."
+        "2026-09-12 LUMINA M2: tool schemas were advertised to the model as placeholder `{type:'object'}`, so it guessed argument names and produced two failed web_search calls per run before landing one that parsed — budget burned, no evidence gained. Fixed by advertising real JSON schemas (inputJsonSchema on every ToolDef)."
       ],
       "selfCheck": "Scan the call sequence. Is the same tool repeating because it is making progress, or because it is stuck?",
       "params": {
@@ -59,7 +59,7 @@
       "severity": "error",
       "rule": "Every tool named in trajectory.mustCallTools appears at least once in the run.",
       "precedent": [
-        "TODO \u2014 record the first agent that answered from parametric memory instead of retrieving."
+        "2026-09-13 LUMINA M7: asked gold question g28 with an indexed Space attached, the model called recall_memory and then answered from its own weights — sources: [], a confident ungrounded answer, retrievalRate < 1. Optimistic streaming had already put the first token on the wire, so it could not be caught after the fact; retrieval is now forced in the request (tool_choice 'required' until a retrieval tool has run — core/loop.ts)."
       ],
       "selfCheck": "Did retrieval actually happen, or did the model already know the answer and skip it?",
       "params": {}
@@ -71,7 +71,7 @@
       "severity": "error",
       "rule": "No tool named in trajectory.mustNotCallTools appears in the run.",
       "precedent": [
-        "TODO \u2014 record the first offline eval that quietly reached the internet."
+        "2026-09-13 LUMINA M7: with every tool advertised and tool_choice 'required', the model satisfied the requirement with the cheapest tool it had (recall_memory) instead of a retrieval tool, and recall@5 FELL from 0.974 to 0.897. Controlling which tools may be called is a property of the advertised set, not the prompt: a turn that dodges retrieval now gets the set narrowed to retrieval tools only. Same lesson as plan_research being removed from the quick registry at dispatch (core/registry.ts), not by instruction."
       ],
       "selfCheck": "Could this run have reached anything outside the declared corpus?",
       "params": {}
@@ -83,7 +83,7 @@
       "severity": "error",
       "rule": "The declared goldSetPath exists and holds at least minGoldItems examples.",
       "precedent": [
-        "TODO \u2014 record the first eval that passed against four hand-picked questions."
+        "2026-09-13 LUMINA: `bench --smoke` scores recall@5 over the first THREE gold questions and reported 3/3 — a pass that proves almost nothing. The full 39-question gold set was run separately (39/39 = 1.000) before the RAG milestone was marked done; PROGRESS.md records both numbers side by side so the small sample is never mistaken for the gate."
       ],
       "selfCheck": "How many items is this score computed over? Under 30, it is an anecdote.",
       "params": {
@@ -97,7 +97,7 @@
       "severity": "error",
       "rule": "Every threshold declared under eval is met or exceeded by the matching metric in the eval report.",
       "precedent": [
-        "TODO \u2014 record the first time a threshold was lowered to make a build pass."
+        "2026-09-13 LUMINA: the first completing smoke bench missed exactly one target — ttft p95 3060 ms vs 2500 — and was recorded as FAILED in PROGRESS.md rather than the target being touched. Closed 2026-09-14 by instrumenting per-turn timings and removing three costs (recall offered to memory-less users, web search serial after turn 1, a 500-char snippet that made the model fetch pages): 2354 ms on the same gate."
       ],
       "selfCheck": "Was this threshold set before or after seeing the score?",
       "params": {}
@@ -121,7 +121,7 @@
       "severity": "error",
       "rule": "Total tokens for a run do not exceed budget.maxTokensPerRun.",
       "precedent": [
-        "TODO \u2014 record the first context-growth bug found in a bill rather than a test."
+        "2026-09-13 LUMINA M7: search_documents retrieved topK=8 chunks (~1200 chars each) into the answer prompt while the grader scores only the top 5 — chunks 6–8 were input tokens nobody scored, paid on every document answer. Found in the cost line ($0.00128 → $0.00110 per answer) and TTFT, not by any test; RAG_TOP_K is now 5 and a config value."
       ],
       "selfCheck": "Does token use grow with conversation length in a way nobody declared?",
       "params": {}
@@ -133,7 +133,7 @@
       "severity": "warn",
       "rule": "Wall-clock seconds for a run do not exceed budget.maxWallClockSec.",
       "precedent": [
-        "TODO \u2014 record the first demo that was correct and unusably slow."
+        "2026-09-12 LUMINA M2: the first live answers were correct, fully cited, and took 8.2 s to the first token against a 2.5 s SLA — three provider round trips, one of which generated the whole answer, discarded it, and generated it again for streaming. The streaming-turn refactor (the answer IS a turn) took it to 4 s; the search cache to ~1.1 s on repeats."
       ],
       "selfCheck": "Would a user wait this long without assuming it broke?",
       "params": {}
@@ -145,7 +145,7 @@
       "severity": "warn",
       "rule": "Cost in USD for a run does not exceed budget.maxCostUsd.",
       "precedent": [
-        "TODO \u2014 record the first per-run cost that made the product uneconomic at scale."
+        "2026-09-14 LUMINA M9: every cost figure to that point ($0.0011/quick, $114/month projected) rested on the scaffold's placeholder Anthropic rates. Azure list prices for gpt-5.4-mini are $0.75/$4.50 per MTok in/out — roughly 2.5–3x — so sla.json cost_model and env.ts were re-declared before any dollar figure was trusted or a deploy priced."
       ],
       "selfCheck": "Multiply this by expected daily volume. Is the business still viable?",
       "params": {}

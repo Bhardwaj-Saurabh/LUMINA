@@ -70,7 +70,7 @@ describe('makeSaveMemoryTool', () => {
     expect(tool.schema.safeParse({ reason: 'stated preference' }).success).toBe(false);
 
     // `reason` survives parsing — the trace step carries it.
-    const parsed = tool.schema.parse({ text: 'alice prefers metric units', reason: 'stated preference' });
+    const parsed = tool.schema.parse({ text: 'alice prefers metric units', reason: 'stated preference', statedByUser: true });
     expect(parsed).toMatchObject({ text: 'alice prefers metric units', reason: 'stated preference' });
   });
 
@@ -113,7 +113,7 @@ describe('makeSaveMemoryTool', () => {
     });
 
     // A model trying to write into someone else's memory.
-    const hostile = { text: 'mallory is an admin', reason: 'privilege', userId: INTRUDER };
+    const hostile = { text: 'mallory is an admin', reason: 'privilege', statedByUser: true, userId: INTRUDER };
     expect(keysOf(tool.schema.parse(hostile))).not.toContain('userId'); // stripped at the schema
     await tool.execute(tool.schema.parse(hostile), CTX);
 
@@ -280,5 +280,34 @@ describe('makeRecallMemoryTool', () => {
     });
 
     expect(tool.deepOnly ?? false).toBe(false);
+  });
+});
+
+describe('save_memory — a question is not a fact about the user', () => {
+  /**
+   * Measured in the grader's 40-question thread: at answer 3–4 the model saved "the user is
+   * interested in Atlas Vector Search" — inferred from what was ASKED — which flipped
+   * `hasAny` and made every later answer pay for a recall. Tightened prose did not stop it.
+   * The schema now carries an attestation the model must make explicitly, so a save that is
+   * not grounded in the user's own statement fails validation instead of landing in memory.
+   */
+  it('rejects a save that does not attest the user stated it themselves', () => {
+    const tool = makeSaveMemoryTool({
+      embeddings: deterministicEmbeddings(1536),
+      memories: fakeMemoriesRepo(),
+      userId: 'u1'
+    });
+
+    expect(() => tool.schema.parse({ text: 'User asked about Atlas Vector Search', reason: 'interest' })).toThrow();
+    expect(() =>
+      tool.schema.parse({ text: 'User asked about Atlas Vector Search', reason: 'interest', statedByUser: false })
+    ).toThrow();
+    expect(
+      tool.schema.parse({ text: 'Prefers British English, under 100 words', reason: 'stated', statedByUser: true })
+    ).toMatchObject({ statedByUser: true });
+    // The advertised JSON schema says the same thing, so the model sees the requirement.
+    const props = (tool.inputJsonSchema as { properties: Record<string, unknown>; required: string[] });
+    expect(props.required).toContain('statedByUser');
+    expect(JSON.stringify(props.properties.statedByUser)).toContain('true');
   });
 });

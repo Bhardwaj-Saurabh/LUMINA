@@ -187,3 +187,56 @@ rotating unused slices of `queries.web`).
   `web_search → fetch_page` or `→ web_search` before answering; each another ~1 s round trip
   plus its tool (3.5–4.5 s TTFT), ~10 of a 75-answer pool ⇒ they WERE the p95. H9 removed the
   shape by giving the model the content the provider had already returned.
+
+### M9 (2026-09-14) — full bench, first two runs
+
+**Cost model re-declared** (`benchmark/sla.json` `cost_model`, the one sanctioned edit there, and
+`env.ts` to match): Azure gpt-5.4-mini $0.75 / $4.50 per MTok in/out, text-embedding-3-large
+$0.13, Tavily $0.008 per basic credit. The scaffold's placeholder Anthropic rates had understated
+cost ~2.5–3×; real figures: **$0.0049/quick, $0.0113/deep**, both far inside their caps.
+
+**Quality case law filled** (`quality/rules.json` precedents — the file itself asks the cohort to
+replace its TODOs): all ten rules now cite an incident from this project. P2 ✓.
+
+**Full bench run 1: 14/16 rows green, two misses with one cause.** recall@5 30/30 · cache hit
+93.8 % · every deep target (plan p95 3533, 3.56× sources, $0.0113) · grounding 0.981 · ingest
+decoupling 0.32× · 202 accept 147 ms. ✗ ttft p95 6481 ms and ✗ error rate 11.1 %: the grader
+asks all 40 web questions in ONE thread at concurrency 4, and every request prepended the whole
+unbounded thread — input tokens climbed 6k → 14k per answer and 8/40 (plus one deep run) died
+as the deployment's tokens-per-minute quota bit. Nine runs preserved in `runs/failing/`.
+
+Fixes (338 tests): history bounded to the most recent `HISTORY_MAX_MESSAGES` (8); the error
+text of a failed run is now logged and stored on the requests row (the nine failures had left
+only `terminated: "error"` server-side); the prefetch no longer skips threads with history
+(it had been off for the grader's whole web workload — `prefetch issued 0/40`); `save_memory`'s
+contract forbids inferring interests from questions (the model had saved "the user is interested
+in Atlas Vector Search" from a search topic, flipping `hasAny` and re-introducing the recall turn
+for the next 36 answers).
+
+Grader-shaped reproduction (40 web, one thread, concurrency 4): before → after —
+answered 32/40 → **40/40**, errors 8 → **0**, max input tokens 14 262 → 5 463, turnCount all 2,
+ttft p50 1789 / **p95 3000** (Azure per-turn tails under 4-way contention: turn-1 p95 1333 +
+answer p95 1294). The 30 sequential doc answers dilute that in the real 75-answer pool.
+
+A3 ("no tool thrash") warns on deep runs: 5–6 consecutive `web_search` is one search per
+sub-question, not a retry loop. `expectations.json` declares `maxConsecutiveSameTool: 4` and
+says a threshold set after seeing the score is not a threshold — so it stays, and the warning
+is documented here rather than declared away.
+
+**Full bench runs 2 and 3 (after the fixes):** 15/16 rows green each time; the one miss is
+ttft p95, falling **6481 → 3780 → 2880 ms** (gate 2500). Run 3: 0 errors · recall@5 30/30 ·
+cache hit 100 % · deep plan p95 2335, 3.22× sources, $0.0113 · grounding 0.985 · 202 accept
+170 ms · $0.0036/quick. Between runs 2 and 3: a spurious memory (the model saving "the user is
+interested in Atlas Vector Search" — later "prefers concise explanations" — inferred from
+QUESTIONS, then attested `statedByUser: true` when the schema demanded it) kept re-introducing
+the recall turn; prose and attestation both failed, so `save_memory` is now advertised only when
+the message could carry a statement about the user (`core/tools/memoryGate.ts`: first person or
+an explicit "remember"). H5 (a nano deployment for the decision turn) was measured and REVERTED
+to opt-in: on this account it was ~2.7× slower (turn-1 p50 847 → 2309 ms) and issued duplicate
+tool calls. What remains of the p95 is the `gpt-5.4-mini` answer turn's first delta at 3–4.7 s
+under 4-way contention — provider tail, measured, not ours. Two more experiments, both
+measured and NOT adopted: showing the model 1000 chars per result instead of 1500 made the
+p95 worse (4715); the nano run itself left four more failed runs (3 × `read ECONNRESET`, 1 cap)
+that are preserved in `runs/failing/` — a "faster model" is a hypothesis to measure, not a fact.
+A3 note, precisely: one deep run made 7 consecutive searches with 6 sub-questions, so at least
+one sub-question searched twice; still fan-out, not a retry loop, and still a warning.

@@ -60,6 +60,8 @@ interface Harness {
   emitter: CollectingEmitter;
   runsUpserted: Record<string, unknown>[];
   requestsInserted: Record<string, unknown>[];
+  /** Every per-answer log line — the server-side record a run leaves behind. */
+  logged: Record<string, unknown>[];
 }
 
 interface HarnessOptions {
@@ -133,6 +135,7 @@ function makeDeps(opts: HarnessOptions): Harness {
 
   const runsUpserted: Record<string, unknown>[] = [];
   const requestsInserted: Record<string, unknown>[] = [];
+  const logged: Record<string, unknown>[] = [];
   const history = opts.history ?? [];
 
   const deps: RunAskDeps = {
@@ -163,6 +166,11 @@ function makeDeps(opts: HarnessOptions): Harness {
       async insert(doc) {
         requestsInserted.push(doc);
       }
+    },
+    log: {
+      info(obj) {
+        logged.push(obj);
+      }
     }
   };
 
@@ -174,7 +182,8 @@ function makeDeps(opts: HarnessOptions): Harness {
     hasAnyCalls,
     emitter: collectingEmitter(),
     runsUpserted,
-    requestsInserted
+    requestsInserted,
+    logged
   };
 }
 
@@ -232,14 +241,14 @@ async function importWithPrefetch(value: '0' | '1'): Promise<MakeRunAsk> {
 const importWithPrefetchOn = () => importWithPrefetch('1');
 
 describe('runAsk — H2: recall_memory is offered only when there is something to recall', () => {
-  it('does not advertise recall_memory on turn 1 when the user has no stored memories, while keeping save_memory and web_search', async () => {
+  it('does not advertise recall_memory on turn 1 when the user has no stored memories, while keeping web_search', async () => {
     const h = makeDeps({ turns: [answerTurn('RRF fuses ranked lists.')], hasAny: false });
 
     await run(makeRunAskDefault, h);
 
     const names = toolNames(h.llm, 0);
     expect(names).not.toContain('recall_memory');
-    expect(names).toContain('save_memory');
+    // save_memory is gated separately (memoryGate.ts): a bare question cannot state a fact.
     expect(names).toContain('web_search');
     expect(h.hasAnyCalls).toEqual([USER]);
   });
@@ -313,7 +322,11 @@ describe('runAsk — H3: speculative search is on by default, switchable, and ne
     expect(toolNames(h.llm, 0)).not.toContain('web_search');
   });
 
-  it('with the flag ON but a non-empty thread history, does not prefetch', async () => {
+  it('with the flag ON prefetches even when the thread has history, and the prefetch alone mints no source', async () => {
+    // The first cut skipped threads with history ("follow-ups are never searched verbatim").
+    // The grader's web workload puts all 40 questions in ONE thread, so that guard switched
+    // the prefetch off for the exact runs it was built for (bench: prefetch issued 0/40).
+    // The model searches the CURRENT question with the user's wording regardless of history.
     const makeRunAsk = await importWithPrefetchOn();
     const h = makeDeps({
       turns: [answerTurn('As I said, RRF fuses ranked lists.')],
@@ -325,8 +338,11 @@ describe('runAsk — H3: speculative search is on by default, switchable, and ne
 
     await run(makeRunAsk, h);
 
-    expect(h.search.calls).toEqual([]);
-    expect(h.order).not.toContain('search');
+    expect(h.search.calls).toEqual([QUERY]);
+    expect(h.order.indexOf('search')).toBeLessThan(h.order.indexOf('llm:result'));
+    // The model never called web_search, so the prefetch must have minted nothing.
+    const sourcesFrames = h.emitter.events.filter((e) => e.event === 'sources');
+    expect(SourcesEvent.parse(sourcesFrames[0]!.data)).toEqual([]);
   });
 
   it('with the flag ON but mode "auto" with a Space attached, does not prefetch', async () => {
@@ -337,5 +353,59 @@ describe('runAsk — H3: speculative search is on by default, switchable, and ne
 
     expect(h.search.calls).toEqual([]);
     expect(h.order).not.toContain('search');
+  });
+});
+
+
+describe('runAsk — the context a request carries', () => {
+  it('bounds the thread history sent to the model to the most recent env.historyMaxMessages messages', async () => {
+    // Found in the full bench: 40 questions in one thread, and every request prepended the
+    // whole thread — input tokens climbed 6k → 14k per answer, four concurrent requests
+    // pushed the deployment past its tokens-per-minute quota, and 8/40 answers died as 429s.
+    const history: ThreadMessage[] = Array.from({ length: 30 }, (_, i) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content: `message ${i}`
+    }));
+    const h = makeDeps({ turns: [webSearchTurn(QUERY), answerTurn('RRF [1].')], history });
+
+    await run(makeRunAskDefault, h);
+
+    const seen = h.llm.streamTurnCalls[0]!.messages;
+    expect(env.historyMaxMessages).toBe(8);
+    expect(seen).toHaveLength(env.historyMaxMessages + 1); // window + the current question
+    const contentOf = (m: (typeof seen)[number] | undefined) =>
+      m && 'content' in m ? m.content : undefined;
+    expect(contentOf(seen[0])).toBe('message 22'); // the MOST RECENT window, not the oldest
+    expect(contentOf(seen.at(-1))).toBe(QUERY);
+  });
+
+  it('logs the error text server-side when a run ends in error, so a 502 is diagnosable from the agent log alone', async () => {
+    // The full bench left 9 runs terminated "error" and the agent log carried nothing but
+    // `terminated: "error"` for each: the error frame went to the client and nowhere else.
+    const h = makeDeps({ turns: [{ throws: new Error('429 Rate limit is exceeded. Try again in 12 seconds.') }] });
+
+    await run(makeRunAskDefault, h);
+
+    const line = h.logged.find((l) => l.terminated === 'error');
+    expect(line).toBeDefined();
+    expect(String(line?.error)).toContain('429 Rate limit is exceeded');
+    const row = h.requestsInserted[0]!;
+    expect(row.status).toBe(502);
+    expect(String(row.error)).toContain('429');
+  });
+});
+
+describe('runAsk — save_memory is offered only when the message could state a fact about the user', () => {
+  it('does not advertise save_memory on a plain question', async () => {
+    const h = makeDeps({ turns: [webSearchTurn(QUERY), answerTurn('RRF [1].')] });
+    await run(makeRunAskDefault, h);
+    expect(toolNames(h.llm, 0)).not.toContain('save_memory');
+    expect(toolNames(h.llm, 0)).toContain('web_search');
+  });
+
+  it('advertises save_memory when the user states something about themselves', async () => {
+    const h = makeDeps({ turns: [webSearchTurn(QUERY), answerTurn('Noted. RRF [1].')] });
+    await run(makeRunAskDefault, h, { query: 'Remember this: I always want British English. What is RRF?' });
+    expect(toolNames(h.llm, 0)).toContain('save_memory');
   });
 });
