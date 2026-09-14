@@ -37,6 +37,7 @@ import type { Budget } from '../budget.js';
 import type { SourceCollector } from '../sourceCollector.js';
 import type { ToolDef, ToolRegistry } from '../registry.js';
 import type { AskEmitter } from '../loop.js';
+import { TimingsRecorder, type RunTimings } from '../timings.js';
 
 export interface RunDeepInput {
   llm: LlmPort;
@@ -61,6 +62,8 @@ export interface RunDeepInput {
 
 export interface RunDeepOutcome {
   terminated: Terminated;
+  /** Same phase shape the quick loop reports (core/timings.ts), plus planMs/fanOutMs. */
+  timings?: RunTimings;
 }
 
 const RESEARCH_PROMPT =
@@ -117,9 +120,10 @@ export async function runDeep(input: RunDeepInput): Promise<RunDeepOutcome> {
   let capped = false;
   const nextStep = () => ++step;
 
+  const timings = new TimingsRecorder();
   const fail = (err: unknown): RunDeepOutcome => {
     emitter.error({ status: 502, error: errorText(err) });
-    return { terminated: 'error' };
+    return { terminated: 'error', timings: timings.build() };
   };
 
   // --- 1. the plan, before anything is retrieved -------------------------------------
@@ -133,6 +137,7 @@ export async function runDeep(input: RunDeepInput): Promise<RunDeepOutcome> {
     return fail(err);
   }
   emitter.plan(plan);
+  timings.plan(now() - planStartedAt);
   emitter.trace({
     step: nextStep(),
     tool: 'plan_research',
@@ -182,6 +187,7 @@ export async function runDeep(input: RunDeepInput): Promise<RunDeepOutcome> {
     const messages: LlmMessage[] = [{ role: 'user', content: sub.question }];
 
     let result;
+    const turnStartedAt = now();
     try {
       // Retrieval only: `required` because a research turn that declines to retrieve has
       // spent a provider call to say nothing.
@@ -197,6 +203,13 @@ export async function runDeep(input: RunDeepInput): Promise<RunDeepOutcome> {
       // must still be consumed before result() — the provider sends usage last.
       for await (const delta of turn.stream) void delta;
       result = await turn.result();
+      timings.turn({
+        toolChoice: 'required',
+        advertised: tools.map((t) => t.name),
+        ms: now() - turnStartedAt,
+        toolCalls: result.toolCalls.map((c) => c.name),
+        usage: result.usage
+      });
       budget.recordUsage({
         tokensIn: result.usage.in,
         tokensOut: result.usage.out,
@@ -265,7 +278,9 @@ export async function runDeep(input: RunDeepInput): Promise<RunDeepOutcome> {
     );
   };
 
+  const fanOutStartedAt = now();
   await mapWithConcurrency(plan.subQuestions, input.concurrency ?? 3, researchOne);
+  timings.fanOut(now() - fanOutStartedAt);
 
   // Every branch failed: there is no partial answer to give, only a failure to report. The
   // budget running out is a different thing — that IS an honest partial, and stays `cap`.
@@ -332,6 +347,8 @@ export async function runDeep(input: RunDeepInput): Promise<RunDeepOutcome> {
     );
   } else {
     const signal = makeSignal(synthesisRemaining);
+    const synthesisStartedAt = now();
+    let firstDeltaMs: number | undefined;
     try {
       const turn = llm.streamTurn({
         system: SYNTHESIS_PROMPT,
@@ -339,8 +356,19 @@ export async function runDeep(input: RunDeepInput): Promise<RunDeepOutcome> {
         tools: [],
         signal
       });
-      for await (const delta of turn.stream) emitToken(delta);
+      for await (const delta of turn.stream) {
+        firstDeltaMs ??= now() - synthesisStartedAt;
+        emitToken(delta);
+      }
       const result = await turn.result();
+      timings.turn({
+        toolChoice: 'auto',
+        advertised: [],
+        ms: now() - synthesisStartedAt,
+        ...(firstDeltaMs !== undefined ? { firstDeltaMs } : {}),
+        toolCalls: [],
+        usage: result.usage
+      });
       budget.recordUsage({
         tokensIn: result.usage.in,
         tokensOut: result.usage.out,
@@ -359,7 +387,7 @@ export async function runDeep(input: RunDeepInput): Promise<RunDeepOutcome> {
       status: 502,
       error: `grounding failure: citations ${dangling.map((n) => `[${n}]`).join(' ')} resolve to no source`
     });
-    return { terminated: 'error' };
+    return { terminated: 'error', timings: timings.build() };
   }
 
   const terminated: Terminated = capped ? 'cap' : 'done';
@@ -376,5 +404,5 @@ export async function runDeep(input: RunDeepInput): Promise<RunDeepOutcome> {
     depth
   };
   emitter.done(done);
-  return { terminated };
+  return { terminated, timings: timings.build() };
 }

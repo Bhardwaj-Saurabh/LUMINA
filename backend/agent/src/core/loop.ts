@@ -30,6 +30,7 @@ import type {
   ToolResultPart
 } from '../providers/llm/port.js';
 import type { Budget } from './budget.js';
+import { TimingsRecorder, type RunTimings } from './timings.js';
 import type { SourceCollector } from './sourceCollector.js';
 import type { ToolDef, ToolRegistry } from './registry.js';
 
@@ -72,6 +73,8 @@ export interface RunLoopInput {
 
 export interface RunLoopOutcome {
   terminated: Terminated;
+  /** Phase attribution for TTFT work (core/timings.ts). Off the contract, on the log line. */
+  timings?: RunTimings;
 }
 
 /**
@@ -86,8 +89,11 @@ const SYSTEM_PROMPT =
   'retrieved, answer honestly without citations.\n' +
   "For web_search, use the user's own wording as the query unless it is genuinely " +
   'ambiguous or too vague to search; do not embellish it with extra words like ' +
-  '"official documentation" or "explained". Never mix narration with a tool call: ' +
-  'either call tools, or write the final answer.\n' +
+  '"official documentation" or "explained". One search normally suffices: each result ' +
+  'carries enough content to answer a factual or definitional question, so answer from it. ' +
+  'Search again or fetch_page only when the results genuinely do not contain what the ' +
+  'question needs. Never mix narration with a tool call: either call tools, or write the ' +
+  'final answer.\n' +
   'Long-term memory is per user and spans threads, and it governs HOW to answer (tone, ' +
   'length, language) as much as what to answer — so it bears on every question, including ' +
   'ones that look purely factual. In your FIRST turn, call recall_memory alongside your ' +
@@ -153,9 +159,10 @@ export async function runLoop(input: RunLoopInput): Promise<RunLoopOutcome> {
     emitter.token({ text });
     fullText += text;
   };
+  const timings = new TimingsRecorder();
   const fail = (err: unknown): RunLoopOutcome => {
     emitter.error({ status: 502, error: errorText(err) });
-    return { terminated: 'error' };
+    return { terminated: 'error', timings: timings.build() };
   };
   const reasonOf = (call: ToolCallRequest) =>
     typeof call.input.reason === 'string' ? { reason: call.input.reason } : {};
@@ -194,14 +201,25 @@ export async function runLoop(input: RunLoopInput): Promise<RunLoopOutcome> {
     if (remaining <= 0) return { kind: 'cap' };
     const signal = makeSignal(remaining);
     let answered = false;
+    const t0 = now();
+    let firstDeltaMs: number | undefined;
     try {
       const turn = llm.streamTurn({ system, messages, tools: advertised, toolChoice, signal });
       for await (const delta of turn.stream) {
+        if (!answered) firstDeltaMs = now() - t0;
         answered = true;
         emitToken(delta);
       }
       const result = await turn.result();
       budget.recordUsage({ tokensIn: result.usage.in, tokensOut: result.usage.out, costUsd: price(result.usage) });
+      timings.turn({
+        toolChoice,
+        advertised: advertised.map((t) => t.name),
+        ms: now() - t0,
+        ...(firstDeltaMs !== undefined ? { firstDeltaMs } : {}),
+        toolCalls: result.toolCalls.map((c) => c.name),
+        usage: result.usage
+      });
       return { kind: 'turn', result, answered };
     } catch (err) {
       if (signal.aborted) return { kind: 'cap' }; // the budget ended the turn, not the provider
@@ -270,6 +288,7 @@ export async function runLoop(input: RunLoopInput): Promise<RunLoopOutcome> {
     }
 
     // All admitted calls of one turn run concurrently and return as ONE tool_results message.
+    const phaseStartedAt = now();
     const results: ToolResultPart[] = await Promise.all(
       admitted.map(async (call) => {
         if (RETRIEVAL_TOOLS.has(call.name)) retrieved = true;
@@ -293,6 +312,11 @@ export async function runLoop(input: RunLoopInput): Promise<RunLoopOutcome> {
     for (const call of refused) {
       results.push({ toolCallId: call.id, ok: false, content: 'not executed: the request budget was exhausted' });
     }
+    timings.toolPhase({
+      turn: timings.build().turnCount,
+      ms: now() - phaseStartedAt,
+      tools: admitted.map((c) => c.name)
+    });
     messages.push({ role: 'tool_results', results });
     if (capped) {
       terminated = 'cap'; // honest partial from evidence already collected
@@ -328,7 +352,7 @@ export async function runLoop(input: RunLoopInput): Promise<RunLoopOutcome> {
       status: 502,
       error: `grounding failure: citations ${dangling.map((n) => `[${n}]`).join(' ')} resolve to no source`
     });
-    return { terminated: 'error' };
+    return { terminated: 'error', timings: timings.build() };
   }
 
   const { tokens, costUsd } = budget.snapshot();
@@ -343,5 +367,5 @@ export async function runLoop(input: RunLoopInput): Promise<RunLoopOutcome> {
     terminated,
     depth
   });
-  return { terminated };
+  return { terminated, timings: timings.build() };
 }

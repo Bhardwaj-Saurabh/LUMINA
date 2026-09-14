@@ -11,11 +11,20 @@ import type { SourceSink } from '../sourceCollector.js';
 import type { ToolDef } from '../registry.js';
 
 const SNIPPET_CHARS = 300;
+/** Default chars of provider content shown to the model per result; env overrides via runAsk. */
+const MODEL_CONTENT_CHARS = 1500;
 
 export function makeWebSearchTool(deps: {
   search: SearchPort;
   collector: SourceSink;
+  /**
+   * How much of each result the MODEL reads. Measured live: shown only a 500-char snippet,
+   * the model reached for fetch_page on a third to half of fresh web questions — an extra LLM
+   * round trip plus the fetch — to read text Tavily had already returned (~1300 chars).
+   */
+  modelContentChars?: number;
 }): ToolDef {
+  const modelContentChars = deps.modelContentChars ?? MODEL_CONTENT_CHARS;
   const schema = z.object({
     query: z.string().min(1),
     reason: z.string().min(1)
@@ -43,7 +52,16 @@ export function makeWebSearchTool(deps: {
             title: r.title,
             snippet: r.snippet
           });
-          return { citation: `[${source.n}]`, url: r.url, title: r.title, snippet: r.snippet };
+          // The source keeps the short snippet (what grounding substring-matches and the UI
+          // shows); the model additionally gets the fuller extract so it can answer without
+          // a second turn. Content never travels on the source.
+          return {
+            citation: `[${source.n}]`,
+            url: r.url,
+            title: r.title,
+            snippet: r.snippet,
+            content: (r.content ?? r.snippet).slice(0, modelContentChars)
+          };
         })
       };
     }

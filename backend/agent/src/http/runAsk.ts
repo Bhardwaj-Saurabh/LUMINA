@@ -46,7 +46,7 @@ export interface RunAskDeps {
   searchLru: Lru<CachedSearchEntry>;
   fetchPage: FetchPagePort;
   embeddings: EmbeddingsPort;
-  memories: Pick<MemoriesRepo, 'insert' | 'searchByVector'>;
+  memories: Pick<MemoriesRepo, 'insert' | 'searchByVector' | 'hasAny'>;
   /** The two halves of hybrid retrieval; absent only in tests that never ask about a Space. */
   chunks?: ChunkSearchPort;
   messages: MessagesWriter;
@@ -99,6 +99,16 @@ export function makeRunAsk(deps: RunAskDeps) {
       lru: deps.searchLru,
       now
     });
+    // Two cheap indexed reads, in parallel: the thread's history and whether this user has
+    // anything to recall. Both shape the request before the first provider call.
+    const [threadMessages, hasMemories] = await Promise.all([
+      deps.messages.listByThread(threadId),
+      deps.memories.hasAny(userId)
+    ]);
+    const history: LlmMessage[] = threadMessages
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .map((m) => ({ role: m.role, content: m.content }));
+
     // The router (SPEC 5.4 "Should"): `mode` decides which retrieval surfaces EXIST for this
     // request, structurally — the same discipline as depth. `auto` advertises both and lets
     // the model choose, and its choice shows up in the trace as the tool it reached for.
@@ -115,7 +125,9 @@ export function makeRunAsk(deps: RunAskDeps) {
     const retrievalTools = (sink: SourceSink): ToolDef[] => {
       const tools: ToolDef[] = [];
       if (body.mode !== 'docs') {
-        tools.push(makeWebSearchTool({ search: cachedSearch, collector: sink }));
+        tools.push(
+          makeWebSearchTool({ search: cachedSearch, collector: sink, modelContentChars: env.searchResultModelChars })
+        );
         tools.push(
           makeFetchPageTool({
             fetchPage: deps.fetchPage,
@@ -161,9 +173,28 @@ export function makeRunAsk(deps: RunAskDeps) {
         now
       })
     );
-    registry.register(
-      makeRecallMemoryTool({ embeddings: deps.embeddings, memories: deps.memories, userId })
-    );
+    // Offered only when there is something to recall (TTFT): to a user with no memories the
+    // tool can only return [], and measured live it cost ~400-500 ms of output tokens on the
+    // decision turn — or a whole extra round trip when the model called it INSTEAD of
+    // searching. Structural, like depth and mode: a tool that cannot help is not on the menu.
+    if (hasMemories) {
+      registry.register(
+        makeRecallMemoryTool({ embeddings: deps.embeddings, memories: deps.memories, userId })
+      );
+    }
+
+    // Speculative search (TTFT): a fresh web question almost always becomes web_search with
+    // the user's own wording (the prompt asks for exactly that), and today that search waits
+    // for LLM turn 1 to finish before it starts. Start it now, into the cache layer only; the
+    // model's identical call joins the in-flight promise. It cannot mint a source (it never
+    // touches the collector), cannot count as a cache hit (a join is a miss), and a failure
+    // here is not a request failure — it surfaces, if at all, through the model's own call.
+    const prefetchable =
+      env.searchPrefetch &&
+      !deep &&
+      history.length === 0 &&
+      (body.mode === 'web' || (body.mode === 'auto' && !docsAvailable));
+    if (prefetchable) cachedSearch.prewarm(body.query);
 
     const runlog = createRunLog({ depth: body.depth, now });
     const toolCallLog: Array<{ name: string; ok: boolean }> = [];
@@ -192,10 +223,6 @@ export function makeRunAsk(deps: RunAskDeps) {
       },
       error: (d) => emitter.error(d)
     };
-
-    const history: LlmMessage[] = (await deps.messages.listByThread(threadId))
-      .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .map((m) => ({ role: m.role, content: m.content }));
 
     const answerId = newId('ans');
     const common = {
@@ -271,7 +298,9 @@ export function makeRunAsk(deps: RunAskDeps) {
       // Operational fields beyond the contract's declared minimum: /stats is computed from
       // these rows, so the evidence a dashboard shows is the evidence the run logs carry.
       ttftMs: doneEvent?.ttftMs ?? null,
-      searchCached: doneEvent?.searchCached ?? false
+      searchCached: doneEvent?.searchCached ?? false,
+      mode: body.mode,
+      timings: outcome.timings ?? null
     });
 
     // §10: one line per answer, keyed by the same requestId the gateway logged, so a single
@@ -289,7 +318,11 @@ export function makeRunAsk(deps: RunAskDeps) {
         costUsd: snapshot.costUsd,
         searchCached: doneEvent?.searchCached ?? false,
         ttftMs: doneEvent?.ttftMs ?? null,
-        latencyMs: doneEvent?.latencyMs ?? now() - startedAt
+        latencyMs: doneEvent?.latencyMs ?? now() - startedAt,
+        mode: body.mode,
+        // Phase attribution (core/timings.ts): where ttftMs went. Off the contract, on the log.
+        timings: outcome.timings ?? null,
+        prefetch: cachedSearch.stats().prefetch
       },
       'answer'
     );

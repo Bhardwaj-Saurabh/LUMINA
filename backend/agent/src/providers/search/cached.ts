@@ -2,6 +2,13 @@
  * Two-tier search cache (ARCHITECTURE §2.2): L1 in-process LRU → L2 `searchCache` collection
  * → provider. Expiry is enforced in code at both tiers because Mongo's TTL sweeper only runs
  * about once a minute, so an expired row stays readable well past its `expiresAt`.
+ *
+ * H3 speculative prewarm: the model's `web_search` runs serially after LLM turn 1, so TTFT
+ * pays for both. `prewarm(userQuery)` runs the same L1 → L2 → provider chain during turn 1 and
+ * parks it in `inFlight`; a later `search(sameQuery)` joins it instead of dispatching. It
+ * returns void and never touches a SourceCollector, so it cannot mint a source — only a
+ * `search()` the model actually issued can. A join is counted as a miss, never a hit: the
+ * >= 50 % cache-hit SLA must not be inflatable by prewarming.
  */
 import { createHash } from 'node:crypto';
 import type { SearchCacheDoc } from '@lumina/contract';
@@ -34,6 +41,19 @@ export interface CachedSearchStats {
   misses: number;
   /** Never true for zero searches: an answer that searched nothing cannot claim a cache hit. */
   allHits: boolean;
+  /** `issued`: prewarm calls; `joined`: model searches that attached to an in-flight prewarm. */
+  prefetch: { issued: number; joined: number };
+}
+
+export interface CachedSearch extends SearchPort {
+  /** Fire-and-forget; see the header. Never throws, never rejects unobserved. */
+  prewarm(rawQuery: string): void;
+  stats(): CachedSearchStats;
+}
+
+interface InFlight {
+  promise: Promise<SearchResult[]>;
+  speculative: boolean;
 }
 
 const L1_MAX_ENTRIES = 512;
@@ -59,16 +79,29 @@ function isTimeSensitive(normalizedQuery: string, at: number): boolean {
   return (normalizedQuery.match(/\b\d{4}\b/g) ?? []).some((year) => Number(year) >= currentYear);
 }
 
-export function makeCachedSearch(
-  opts: CachedSearchOptions
-): SearchPort & { stats(): CachedSearchStats } {
+export function makeCachedSearch(opts: CachedSearchOptions): CachedSearch {
   const { inner, store, ttlSeconds, now, provider } = opts;
   const lru = opts.lru ?? createLru<CachedSearchEntry>(L1_MAX_ENTRIES);
-  const inFlight = new Map<string, Promise<SearchResult[]>>();
+  const inFlight = new Map<string, InFlight>();
   let hits = 0;
   let misses = 0;
+  let issued = 0;
+  let joined = 0;
 
   const fresh = (expiresAt: number, at: number): boolean => expiresAt > at;
+
+  const readL1 = (key: string, at: number): SearchResult[] | undefined => {
+    const entry = lru.get(key);
+    return entry && fresh(entry.expiresAt, at) ? entry.results : undefined;
+  };
+
+  async function readL2(key: string, at: number): Promise<SearchResult[] | undefined> {
+    const row = await store.get(key);
+    if (!row || !fresh(millis(row.expiresAt), at)) return undefined;
+    const results = row.results as unknown as SearchResult[];
+    lru.set(key, { results, expiresAt: millis(row.expiresAt) });
+    return results;
+  }
 
   async function fetchAndStore(
     key: string,
@@ -92,6 +125,24 @@ export function makeCachedSearch(
     return results;
   }
 
+  /** Registers synchronously so a `search()` on the very next line can join. */
+  function track(key: string, work: Promise<SearchResult[]>, speculative: boolean): Promise<SearchResult[]> {
+    const promise = work.finally(() => {
+      inFlight.delete(key);
+    });
+    inFlight.set(key, { promise, speculative });
+    return promise;
+  }
+
+  // A join is a miss whatever it joined: the provider is doing the work, not the cache.
+  function join(key: string): Promise<SearchResult[]> | undefined {
+    const pending = inFlight.get(key);
+    if (!pending) return undefined;
+    misses += 1;
+    if (pending.speculative) joined += 1;
+    return pending.promise;
+  }
+
   return {
     async search(rawQuery, searchOpts) {
       const normalized = normalizeQuery(rawQuery);
@@ -100,30 +151,53 @@ export function makeCachedSearch(
 
       // A bypassed search still writes through, refreshing the TTL window for later callers,
       // and counts as a miss: `searchCached` must mean every search came from cache.
-      if (!isTimeSensitive(normalized, at)) {
-        const l1 = lru.get(key);
-        if (l1 && fresh(l1.expiresAt, at)) {
+      const bypass = isTimeSensitive(normalized, at);
+      if (!bypass) {
+        const l1 = readL1(key, at);
+        if (l1) {
           hits += 1;
-          return l1.results;
-        }
-        const row = await store.get(key);
-        if (row && fresh(millis(row.expiresAt), at)) {
-          const results = row.results as unknown as SearchResult[];
-          lru.set(key, { results, expiresAt: millis(row.expiresAt) });
-          hits += 1;
-          return results;
+          return l1;
         }
       }
+      // Before L2: a joiner must never pay a store round trip the in-flight call already paid.
+      const early = join(key);
+      if (early) return early;
+      if (!bypass) {
+        const l2 = await readL2(key, at);
+        if (l2) {
+          hits += 1;
+          return l2;
+        }
+      }
+      // Something may have dispatched while L2 was in flight.
+      const late = join(key);
+      if (late) return late;
 
       misses += 1;
-      const pending = inFlight.get(key);
-      if (pending) return pending;
-      const call = fetchAndStore(key, rawQuery, normalized, searchOpts).finally(() => {
-        inFlight.delete(key);
-      });
-      inFlight.set(key, call);
-      return call;
+      return track(key, fetchAndStore(key, rawQuery, normalized, searchOpts), false);
     },
-    stats: () => ({ hits, misses, allHits: hits > 0 && misses === 0 })
+    prewarm(rawQuery) {
+      issued += 1;
+      const normalized = normalizeQuery(rawQuery);
+      const key = searchCacheKey(rawQuery, provider);
+      if (inFlight.has(key)) return;
+      const at = now();
+      const run = async (): Promise<SearchResult[]> => {
+        if (!isTimeSensitive(normalized, at)) {
+          const cached = readL1(key, at) ?? (await readL2(key, at));
+          if (cached) return cached;
+        }
+        return fetchAndStore(key, rawQuery, normalized, undefined);
+      };
+      // Nobody may ever join: swallow here so a provider failure cannot surface as an unhandled
+      // rejection. The tracked promise itself still rejects, so a joiner sees the real error.
+      track(key, run(), true).catch(() => undefined);
+    },
+    stats: () => ({
+      hits,
+      misses,
+      allHits: hits > 0 && misses === 0,
+      prefetch: { issued, joined }
+    })
   };
 }

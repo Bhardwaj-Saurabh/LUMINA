@@ -7,7 +7,15 @@
 export interface SearchResult {
   url: string;
   title: string;
+  /** Short, verbatim, what the citation shows and what grounding substring-matches. */
   snippet: string;
+  /**
+   * The provider's fuller extract when it has one (Tavily basic returns ~1300 chars). Shown
+   * to the MODEL, never on the source: measured live, a model that only sees a 500-char
+   * snippet reaches for fetch_page a third to half of the time — an extra ~1 s LLM round trip
+   * plus the fetch — to read text the provider had already handed us.
+   */
+  content?: string;
 }
 
 export interface SearchPort {

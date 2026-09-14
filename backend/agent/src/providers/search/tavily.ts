@@ -37,7 +37,12 @@ export function makeTavilySearch(apiKey: string): SearchPort {
       );
       return (body.results ?? [])
         .filter((r) => r.url && r.title)
-        .map((r) => ({ url: r.url!, title: r.title!, snippet: (r.content ?? '').slice(0, 500) }));
+        .map((r) => ({
+          url: r.url!,
+          title: r.title!,
+          snippet: (r.content ?? '').slice(0, 500),
+          ...(r.content ? { content: r.content } : {})
+        }));
     }
   };
 }

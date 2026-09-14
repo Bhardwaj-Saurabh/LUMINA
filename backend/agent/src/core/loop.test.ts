@@ -922,3 +922,79 @@ describe('runLoop tool deadline', () => {
     expect(['cap', 'done', 'error']).toContain(outcome.terminated);
   });
 });
+
+// ---------------------------------------------------------------------------
+// m. TIMINGS — TTFT is attributable, not one opaque number
+// ---------------------------------------------------------------------------
+
+describe('runLoop timings', () => {
+  /**
+   * TTFT p95 is the one red SLA and nothing times an LLM turn today: `ttftMs` is stamped at the
+   * first delta and tools carry `ms`, but "how long did turn 1 take" cannot be answered. The
+   * outcome grows an OPTIONAL `timings` block — off the SSE contract, off the run log — so each
+   * experiment against TTFT can be attributed to the decision turn, the tools, or the answer
+   * turn's prefill.
+   */
+  it('reports one timing per LLM turn, the tool phase, and which turn answered', async () => {
+    const h = harness([
+      {
+        toolCalls: [{ id: 't1', name: 'web_search', input: { query: 'lumina', reason: 'r' } }],
+        usage: { in: 100, out: 20 }
+      },
+      { deltas: ['LUMINA is', ' an answer engine [1]'], usage: { in: 200, out: 40 } }
+    ]);
+
+    const outcome = await runLoop(loopInput(h) as never);
+
+    const timings = outcome.timings!;
+    expect(timings.turnCount).toBe(2);
+    expect(timings.turns).toHaveLength(2);
+    // Turn 1: forced retrieval, called web_search, spoke no text.
+    expect(timings.turns[0]).toMatchObject({
+      index: 1,
+      toolChoice: 'required',
+      toolCalls: ['web_search'],
+      usage: { in: 100, out: 20 }
+    });
+    expect(timings.turns[0]?.firstDeltaMs).toBeUndefined();
+    expect(timings.turns[0]?.advertised).toContain('web_search');
+    // Turn 2: free choice, answered — so it has a first-delta stamp.
+    expect(timings.turns[1]).toMatchObject({ index: 2, toolChoice: 'auto', toolCalls: [] });
+    expect(typeof timings.turns[1]?.firstDeltaMs).toBe('number');
+    // Roll-ups the aggregator reads directly.
+    expect(typeof timings.turn1Ms).toBe('number');
+    expect(typeof timings.answerFirstDeltaMs).toBe('number');
+    expect(timings.toolPhases).toHaveLength(1);
+    expect(timings.toolPhases[0]).toMatchObject({ turn: 1, tools: ['web_search'] });
+    expect(typeof timings.toolsMs).toBe('number');
+  });
+
+  it('counts the three-turn shape honestly when the first turn dodged retrieval', async () => {
+    // recall_memory only on turn 1 → a forced second retrieval turn → the answer. This is the
+    // "recall in a separate turn" shape that costs a whole extra round trip (p50 2215 ms).
+    const h = harness(
+      [
+        { toolCalls: [{ id: 'c1', name: 'recall_memory', input: { query: 'prefs', reason: 'r' } }] },
+        { toolCalls: [{ id: 'c2', name: 'web_search', input: { query: 'lumina', reason: 'r' } }] },
+        { deltas: ['Grounded [1]'] }
+      ],
+      {
+        registry: (partial) => {
+          const registry = defaultRegistry(partial.collector);
+          registry.register({
+            name: 'recall_memory',
+            description: 'Recall what this user told you before.',
+            schema: z.object({ query: z.string(), reason: z.string() }),
+            execute: async () => ({ memories: [] })
+          });
+          return registry;
+        }
+      }
+    );
+
+    const outcome = await runLoop(loopInput(h) as never);
+
+    expect(outcome.timings?.turnCount).toBe(3);
+    expect(outcome.timings?.turns.map((t) => t.toolCalls)).toEqual([['recall_memory'], ['web_search'], []]);
+  });
+});

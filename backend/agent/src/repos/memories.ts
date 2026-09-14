@@ -22,6 +22,13 @@ export interface MemoriesRepo {
   searchByVector(args: { userId: string; vector: number[]; limit: number }): Promise<MemoryMatch[]>;
   list(userId: string): Promise<MemoryRow[]>;
   delete(args: { userId: string; memoryId: string }): Promise<boolean>;
+  /**
+   * Whether this user has anything to recall. Cheap (indexed `{userId}`, projection-only) and
+   * the reason it exists is TTFT: offering `recall_memory` to a user with no memories costs a
+   * tool call's worth of output tokens — or a whole extra LLM round trip when the model calls
+   * it INSTEAD of searching — for a result that is always empty.
+   */
+  hasAny(userId: string): Promise<boolean>;
 }
 
 /** Atlas guidance: candidates well above the requested limit, or recall degrades. */
@@ -69,6 +76,11 @@ export function makeMemoriesRepo(db: Db): MemoriesRepo {
         // MemoryDoc.createdAt is iso-string-or-Date; the HTTP Memory schema is string only.
         createdAt: typeof d.createdAt === 'string' ? d.createdAt : d.createdAt.toISOString()
       }));
+    },
+
+    async hasAny(userId) {
+      const one = await col.findOne({ userId }, { projection: { _id: 1 } });
+      return one !== null;
     },
 
     async delete({ userId, memoryId }) {

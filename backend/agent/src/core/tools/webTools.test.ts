@@ -11,7 +11,7 @@
  * returns (loop.ts:124), so "model-readable content" is pinned on the stringified result.
  */
 import { describe, expect, it } from 'vitest';
-import { Source } from '@lumina/contract';
+import { Source, SourcesEvent } from '@lumina/contract';
 import { SourceCollector } from '../sourceCollector.js';
 import {
   scriptedFetchPage,
@@ -92,6 +92,80 @@ describe('makeWebSearchTool', () => {
     expect(content).toContain('[2]');
     expect(content).toContain(RESULTS[0]!.snippet);
     expect(content).toContain(RESULTS[1]!.snippet);
+  });
+});
+
+/**
+ * H9 — the model sees the fuller `content` the provider already returned (Tavily's extract),
+ * so it reaches for fetch_page less often. The SOURCE minted through the collector keeps
+ * `snippet: r.snippet` unchanged: grounding substring-matches the snippet against the fetched
+ * page and the UI renders it, so the source must not grow and must never carry `content`.
+ */
+describe('makeWebSearchTool — provider content reaches the model, never the source (H9)', () => {
+  /** Shape of what execute hands the loop; typed loosely so the assertions are on runtime values. */
+  type ModelResult = { results: Array<Record<string, unknown>> };
+
+  const LONG_CONTENT = 'C'.repeat(3000);
+  /** Built via Object.assign so the fake carries a runtime `content` the port type may not declare yet. */
+  const withContent: SearchResult = Object.assign({}, RESULTS[0]!, { content: LONG_CONTENT });
+
+  const run = async (
+    results: SearchResult[],
+    opts: { modelContentChars?: number } = {}
+  ): Promise<{ model: ModelResult; collector: SourceCollector }> => {
+    const collector = new SourceCollector();
+    const tool = makeWebSearchTool({ search: scriptedSearch([results]), collector, ...opts });
+    const model = (await tool.execute(
+      tool.schema.parse({ query: 'capital of france', reason: 'need the capital' }),
+      ctx
+    )) as ModelResult;
+    return { model, collector };
+  };
+
+  it('gives the model the provider content truncated to exactly modelContentChars while the minted source snippet stays the untouched provider snippet', async () => {
+    const { model, collector } = await run([withContent], { modelContentChars: 1000 });
+
+    const modelResult = model.results[0]!;
+    expect(modelResult.content).toBe(LONG_CONTENT.slice(0, 1000));
+    expect((modelResult.content as string).length).toBe(1000);
+    // The snippet is still there for the model too — content is additive, not a replacement.
+    expect(modelResult.snippet).toBe(RESULTS[0]!.snippet);
+
+    const sources = SourcesEvent.parse(collector.finalize());
+    expect(sources).toHaveLength(1);
+    expect(sources[0]!.snippet).toBe(RESULTS[0]!.snippet);
+    expect(sources[0]!.snippet).not.toContain('CCCC');
+  });
+
+  it('caps model-facing content at 1500 chars by default when modelContentChars is not given', async () => {
+    const { model } = await run([withContent]);
+
+    const content = model.results[0]!.content;
+    expect(typeof content).toBe('string');
+    expect((content as string).length).toBe(1500);
+    expect(content).toBe(LONG_CONTENT.slice(0, 1500));
+  });
+
+  it('falls back to the snippet as model-facing content when the provider result carries no content', async () => {
+    const { model } = await run(RESULTS);
+
+    for (const [i, r] of RESULTS.entries()) {
+      const content = model.results[i]!.content;
+      expect(content).toBeDefined();
+      expect(content).toBe(r.snippet);
+      expect((content as string).length).toBeGreaterThan(0);
+    }
+  });
+
+  it('never lets provider content reach the minted source — the Source object has no content key', async () => {
+    const { collector } = await run([withContent], { modelContentChars: 1000 });
+
+    const raw = collector.finalize();
+    expect(raw).toHaveLength(1);
+    expect(Object.keys(raw[0]!)).not.toContain('content');
+    // Belt and braces: the whole serialised source is free of the long extract.
+    expect(JSON.stringify(raw[0])).not.toContain('CCCC');
+    expect(SourcesEvent.parse(raw)[0]!.snippet).toBe(RESULTS[0]!.snippet);
   });
 });
 

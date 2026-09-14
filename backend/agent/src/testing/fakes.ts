@@ -373,6 +373,7 @@ export interface MemoriesRepo {
   searchByVector(args: { userId: string; vector: number[]; limit: number }): Promise<MemoryMatch[]>;
   list(userId: string): Promise<MemoryRow[]>;
   delete(args: { userId: string; memoryId: string }): Promise<boolean>;
+  hasAny(userId: string): Promise<boolean>;
 }
 
 export interface RecordingMemoriesRepo extends MemoriesRepo {
@@ -412,6 +413,9 @@ export function fakeMemoriesRepo(seed: MemoryRow[] = []): RecordingMemoriesRepo 
     async list(userId) {
       listCalls.push(userId);
       return rows.filter((r) => r.userId === userId);
+    },
+    async hasAny(userId) {
+      return rows.some((r) => r.userId === userId);
     },
     async delete(args) {
       deleteCalls.push(args);

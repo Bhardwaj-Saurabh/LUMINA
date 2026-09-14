@@ -71,6 +71,17 @@ export const env = {
   probeAttempts: num(process.env.PROBE_ATTEMPTS, 20),
   probeDelayMs: num(process.env.PROBE_DELAY_MS, 1500),
 
+  // TTFT levers (ARCHITECTURE §9.1). Each is a flag so an experiment can be switched off
+  // without a code change and measured on the same workload.
+  /**
+   * Start the user's own query as a web search DURING LLM turn 1; the model's identical call
+   * joins it. Default ON since 2026-09-14: measured 10/10 reuse (the model searches verbatim),
+   * cold-web TTFT p50 3465 → 2431 ms, and a join is honestly counted as a cache miss.
+   */
+  searchPrefetch: (process.env.SEARCH_PREFETCH ?? '1') === '1',
+  /** Chars of each search result's content shown to the model (the citation snippet stays short). */
+  searchResultModelChars: num(process.env.SEARCH_RESULT_MODEL_CHARS, 1500),
+
   // Deep search is the expensive gear, so its limits are configuration, not code.
   deepSubQuestionsMin: num(process.env.DEEP_SUB_QUESTIONS_MIN, 3),
   deepSubQuestionsMax: num(process.env.DEEP_SUB_QUESTIONS_MAX, 6),

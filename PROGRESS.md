@@ -10,8 +10,8 @@
 | | |
 |---|---|
 | **Current milestone** | M9 full bench green |
-| **Blockers** | none. One open SLA item carried to M9: **ttft p95 3060 ms vs 2500 ms** — the only red line in an otherwise green smoke bench |
-| **Last gates run** | 2026-09-13 `bench --smoke` via :8787 **completed for the first time**: 4/4 contract probes ✓, 5/5 web answered 0 errors, 4/4 corpus files indexed (202 in 120–152 ms), recall@5 3/3, citation grounding 1.0 with 0 dangling, cost $0.0011/answer, sources-before-token ✓ — and ✗ ttft p95 3060 ms (gate 2500). Bench verdict: FAILED on that one target |
+| **Blockers** | none. ttft p95 closed 2026-09-14 (3060 → 2354 ms on smoke) — see "TTFT investigation" |
+| **Last gates run** | 2026-09-14 `bench --smoke` via :8787 **✓ bench passed, exit 0** — first fully green smoke: 4/4 probes, 5/5 web, 4/4 indexed (202 in 124–199 ms), recall@5 3/3, grounding 17/17, **ttft p95 2354 ms** (gate 2500), answer p95 2628, cost $0.0009/answer |
 | **Deploy state** | not deployed |
 
 ## Milestones
@@ -116,3 +116,74 @@ sub-questions: 3376 ms to first paint against a 4000 ms gate, and poor search qu
 bargain. Asking for one short line each — phrased the way you would type it into a search box —
 took the plan to 1867 ms, halved the cost per deep answer, and halved end-to-end latency,
 because shorter sub-questions are also better queries.
+
+### TTFT investigation (2026-09-14) — Phase 0 baseline, before any lever
+
+Instrumented per-turn timings (`core/timings.ts`, on the log line and `requests` row, off the
+contract). Fixed workload: 5 smoke web queries cold + the same 5 repeated + 20 gold doc questions
+(concurrency 3) + the grader's memory scenario. Client-side TTFT via the provided bench helpers,
+joined to the agent log by `requestId`.
+
+| phase                              |  p50 |  p95 |   max |
+|------------------------------------|-----:|-----:|------:|
+| client TTFT, all 30 quick          | 2716 | 7609 | 13186 |
+| · web cold (Tavily miss)           | 3427 | 5075 |  5075 |
+| · web repeat (cache hit 4/5)       | 2357 | 3005 |  3005 |
+| · docs                             | 2699 | 7609 | 13186 |
+| gateway + network (client − agent) |   47 |   73 |    75 |
+| `turn1Ms` (decision turn)          | 1465 | 4040 | 12201 |
+| `toolsMs` (before the answer)      |  229 | 1476 |  1782 |
+| `answerFirstDeltaMs`               |  785 | 3306 |  3575 |
+
+turnCount: 27 × 2 turns, 3 × 3 turns. Guards: 0 errors, retrievalRate 30/30, memoryRecalled ✓,
+cost $0.00106/answer.
+
+Findings that change the plan:
+- **`reasoning_effort` is not the lever.** Probe against the deployment: the parameter is accepted
+  (incl. `minimal`) but the default already runs at that speed — tool-turn first token 464–990 ms,
+  answer turn 747–1307 ms at every level. The floor is ~0.8–1.0 s per round trip.
+- **The tail is Azure's, not ours.** 8 concurrent tool turns: 0 retries, all HTTP 200, medians
+  ~900 ms, one at 3761 ms. The 12 201 ms decision turn in the baseline had the same token counts
+  as its neighbours. A p95 over ~75 answers tolerates ~3 such outliers; more than that and no
+  code change helps.
+- **The second tool call on turn 1 costs ~400–500 ms.** Turn 1 with `recall_memory` + search is
+  1.3–1.5 s median vs 0.8–0.9 s with one call — output tokens on the critical path (H2's target).
+- **Web cold pays Tavily serially after turn 1** (`toolsMs` p95 1476 on those) — H3's target.
+- Gateway overhead 47–73 ms: transport ruled out.
+
+**Levers measured (same fixed workload, 30 quick answers each):**
+
+| lever                     | ALL p50 | ALL p95 | web-cold p50 | docs p50 | turn1 p50 | turns | guards |
+|---------------------------|--------:|--------:|-------------:|---------:|----------:|-------|--------|
+| baseline                  |    2716 |    7609 |     3427*    |     2699 |      1465 | 27×2, 3×3 | all ✓ |
+| H2 recall only if memories|    1818 |    3379 |     1611*    |     2120 |       911 | 30×2  | all ✓, cost −15 % |
+| H2, genuinely cold web    |    2116 |    6004 |     3465     |     1905 |       810 | 27×2, 3×3 | all ✓ |
+| H2 + H3 prefetch          |    2142 |    7234 |     3344     |     1964 |       864 | 25×2, 4×3, 1×4 | all ✓ |
+| H2 + H3, web-only diag    |       — |       — |   **2594**   |        — |         — | 4×2, 1×3 | all ✓ |
+| **H2 + H3 + H9**          |**1730** |**2854** |   **2431**   | **1729** |       838 | **30×2** | all ✓ |
+
+\* the smoke queries were already in the 6 h L2 cache — not a real cold measurement (fixed by
+rotating unused slices of `queries.web`).
+
+- **H2 kept (unconditional).** A user with nothing to recall is not offered `recall_memory`. The
+  decision turn drops 1465 → ~850 ms (the second tool call's output tokens), the 3-turn
+  "recall instead of search" shape disappears, `memoryRecalled` still ✓ (that user HAS a memory).
+- **H3 kept (flag `SEARCH_PREFETCH=1`).** The model used the user's wording verbatim in 10/10
+  web queries, so the prefetch is reused every time — as an in-flight join, or as an L1 hit when
+  Tavily finished before the model asked. Cold web p50 3465 → 2594. A join is counted as a
+  miss, so the cache-hit SLA cannot be inflated by it.
+- **H9 kept: the model reads the content Tavily already returned.** Tavily `basic` hands back
+  ~1300 chars per result; the adapter sliced it to 500 before the model saw it, and the model
+  fetched pages to read the rest. The source snippet is unchanged (grounding and the UI); the
+  model gets up to `SEARCH_RESULT_MODEL_CHARS` (1500) plus a prompt line that one search
+  normally suffices. Result on the same workload: **every answer two turns (30/30)**, web-cold
+  p50 2431, overall **p50 1730 / p95 2854 / max 4358** vs baseline 2716 / 7609 / 13186.
+  Guards: 0 errors, retrievalRate 30/30, repeat cache hits 5/5, memoryRecalled ✓, $0.00103.
+- **Smoke bench after the levers: ✓ passed, exit 0** — ttft p95 2354 ms (was 3060), every
+  other row unchanged or better. H1 (`reasoning_effort`) measured and dropped: no gain over the
+  default on this deployment, so no knob was added. The full bench is M9's gate; the p95 there
+  pools ~75 answers and tolerates ~3 Azure tail outliers, which is now the remaining risk.
+- **What set the p95 before H9: extra retrieval turns.** 30–50 % of fresh web answers went
+  `web_search → fetch_page` or `→ web_search` before answering; each another ~1 s round trip
+  plus its tool (3.5–4.5 s TTFT), ~10 of a 75-answer pool ⇒ they WERE the p95. H9 removed the
+  shape by giving the model the content the provider had already returned.
