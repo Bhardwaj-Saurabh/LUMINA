@@ -3,12 +3,27 @@
  * timeout throws — the tool layer records the visible ok:false trace (A1); nothing here
  * may fabricate an empty-but-successful result.
  */
-import type { FetchPagePort, FetchedPage, SearchPort, SearchResult } from './port.js';
+import {
+  QUICK_DEPTH,
+  QUICK_MAX_RESULTS,
+  type FetchPagePort,
+  type FetchedPage,
+  type SearchOptions,
+  type SearchPort,
+  type SearchResult
+} from './port.js';
 
 const TIMEOUT_MS = 10_000;
 
-async function post<T>(url: string, body: Record<string, unknown>, apiKey: string): Promise<T> {
-  const res = await fetch(url, {
+type Fetch = typeof globalThis.fetch;
+
+async function post<T>(
+  url: string,
+  body: Record<string, unknown>,
+  apiKey: string,
+  doFetch: Fetch = fetch
+): Promise<T> {
+  const res = await doFetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
     body: JSON.stringify(body),
@@ -27,13 +42,18 @@ interface TavilyExtractResponse {
   failed_results?: Array<{ url?: string; error?: string }>;
 }
 
-export function makeTavilySearch(apiKey: string): SearchPort {
+export function makeTavilySearch(apiKey: string, doFetch: Fetch = fetch): SearchPort {
   return {
-    async search(query: string): Promise<SearchResult[]> {
+    async search(query: string, opts?: SearchOptions): Promise<SearchResult[]> {
       const body = await post<TavilySearchResponse>(
         'https://api.tavily.com/search',
-        { query, max_results: 5, search_depth: 'basic' },
-        apiKey
+        {
+          query,
+          max_results: opts?.maxResults ?? QUICK_MAX_RESULTS,
+          search_depth: opts?.depth ?? QUICK_DEPTH
+        },
+        apiKey,
+        doFetch
       );
       return (body.results ?? [])
         .filter((r) => r.url && r.title)

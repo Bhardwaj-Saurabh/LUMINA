@@ -57,6 +57,30 @@ describe('makeWebSearchTool', () => {
     expect(parsed).toMatchObject({ query: 'capital of france', reason: 'need the capital' });
   });
 
+  it('asks the provider for nothing special when no search shape is configured (quick gear)', async () => {
+    const search = scriptedSearch([RESULTS]);
+    const tool = makeWebSearchTool({ search, collector: new SourceCollector() });
+
+    await tool.execute(tool.schema.parse({ query: 'capital of france', reason: 'why' }), ctx);
+
+    expect(search.calls[0]!.opts).toBeUndefined();
+  });
+
+  it('passes the configured search shape to the provider, so the deep gear retrieves more widely', async () => {
+    // Deep is not only WIDER (more sub-questions) but DEEPER per search. Without this the
+    // bench measured a deep answer at 1.69x the sources of the same query run quick (cap 2x).
+    const search = scriptedSearch([RESULTS]);
+    const tool = makeWebSearchTool({
+      search,
+      collector: new SourceCollector(),
+      searchOptions: { maxResults: 10, depth: 'advanced' }
+    });
+
+    await tool.execute(tool.schema.parse({ query: 'capital of france', reason: 'why' }), ctx);
+
+    expect(search.calls[0]!.opts).toEqual({ maxResults: 10, depth: 'advanced' });
+  });
+
   it('executes the injected SearchPort with the query and registers every result with the collector as web sources', async () => {
     const search = scriptedSearch([RESULTS]);
     const collector = new SourceCollector();

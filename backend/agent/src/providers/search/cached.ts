@@ -13,7 +13,13 @@
 import { createHash } from 'node:crypto';
 import type { SearchCacheDoc } from '@lumina/contract';
 import { createLru, type Lru } from '../../infra/lru.js';
-import type { SearchPort, SearchResult } from './port.js';
+import {
+  QUICK_DEPTH,
+  QUICK_MAX_RESULTS,
+  type SearchOptions,
+  type SearchPort,
+  type SearchResult
+} from './port.js';
 
 export interface SearchCacheStore {
   get(key: string): Promise<SearchCacheDoc | null>;
@@ -47,7 +53,7 @@ export interface CachedSearchStats {
 
 export interface CachedSearch extends SearchPort {
   /** Fire-and-forget; see the header. Never throws, never rejects unobserved. */
-  prewarm(rawQuery: string): void;
+  prewarm(rawQuery: string, opts?: SearchOptions): void;
   stats(): CachedSearchStats;
 }
 
@@ -68,8 +74,25 @@ const millis = (iso: string | Date): number =>
 
 const normalizeQuery = (query: string): string => query.trim().toLowerCase().replace(/\s+/g, ' ');
 
-export function searchCacheKey(query: string, provider: string): string {
-  return createHash('sha256').update(`${normalizeQuery(query)}|${provider}`).digest('hex');
+/**
+ * The search SHAPE is part of the identity of a cached result: the deep gear asks Tavily for
+ * more results and a deeper crawl, so the same query returns a different set. Without this,
+ * a quick 5-result row would be served to a deep search and deep would silently inherit
+ * quick's retrieval. The quick defaults contribute nothing, so keys written before the deep
+ * gear had its own shape stay valid.
+ */
+const shapeOf = (opts?: SearchOptions): string => {
+  const maxResults = opts?.maxResults ?? QUICK_MAX_RESULTS;
+  const depth = opts?.depth ?? QUICK_DEPTH;
+  return maxResults === QUICK_MAX_RESULTS && depth === QUICK_DEPTH
+    ? ''
+    : `|r${maxResults}|d${depth}`;
+};
+
+export function searchCacheKey(query: string, provider: string, opts?: SearchOptions): string {
+  return createHash('sha256')
+    .update(`${normalizeQuery(query)}|${provider}${shapeOf(opts)}`)
+    .digest('hex');
 }
 
 /** SPEC 5.2: "today"/"latest"/a current-or-future year make a cached answer stale by definition. */
@@ -107,7 +130,7 @@ export function makeCachedSearch(opts: CachedSearchOptions): CachedSearch {
     key: string,
     rawQuery: string,
     normalized: string,
-    searchOpts: { maxResults?: number } | undefined
+    searchOpts: SearchOptions | undefined
   ): Promise<SearchResult[]> {
     // The provider sees the caller's query verbatim; normalization only derives the key.
     const results = await inner.search(rawQuery, searchOpts);
@@ -146,7 +169,7 @@ export function makeCachedSearch(opts: CachedSearchOptions): CachedSearch {
   return {
     async search(rawQuery, searchOpts) {
       const normalized = normalizeQuery(rawQuery);
-      const key = searchCacheKey(rawQuery, provider);
+      const key = searchCacheKey(rawQuery, provider, searchOpts);
       const at = now();
 
       // A bypassed search still writes through, refreshing the TTL window for later callers,
@@ -176,10 +199,10 @@ export function makeCachedSearch(opts: CachedSearchOptions): CachedSearch {
       misses += 1;
       return track(key, fetchAndStore(key, rawQuery, normalized, searchOpts), false);
     },
-    prewarm(rawQuery) {
+    prewarm(rawQuery, searchOpts) {
       issued += 1;
       const normalized = normalizeQuery(rawQuery);
-      const key = searchCacheKey(rawQuery, provider);
+      const key = searchCacheKey(rawQuery, provider, searchOpts);
       if (inFlight.has(key)) return;
       const at = now();
       const run = async (): Promise<SearchResult[]> => {
@@ -187,7 +210,7 @@ export function makeCachedSearch(opts: CachedSearchOptions): CachedSearch {
           const cached = readL1(key, at) ?? (await readL2(key, at));
           if (cached) return cached;
         }
-        return fetchAndStore(key, rawQuery, normalized, undefined);
+        return fetchAndStore(key, rawQuery, normalized, searchOpts);
       };
       // Nobody may ever join: swallow here so a provider failure cannot surface as an unhandled
       // rejection. The tracked promise itself still rejects, so a joiner sees the real error.

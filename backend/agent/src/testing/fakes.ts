@@ -266,18 +266,24 @@ export interface SearchResult {
   snippet: string;
 }
 
+/** Structural mirror of providers/search/port.ts — fakes never import production types. */
+export interface SearchOptions {
+  maxResults?: number;
+  depth?: 'basic' | 'advanced';
+}
+
 export interface SearchPort {
-  search(query: string, opts?: { maxResults?: number }): Promise<SearchResult[]>;
+  search(query: string, opts?: SearchOptions): Promise<SearchResult[]>;
 }
 
 export interface ScriptedSearchPort extends SearchPort {
-  calls: Array<{ query: string; opts?: { maxResults?: number } }>;
+  calls: Array<{ query: string; opts?: SearchOptions }>;
 }
 
 /** Each call consumes the next scripted result set; an Error entry makes that call throw. */
 export function scriptedSearch(resultSets: Array<SearchResult[] | Error>): ScriptedSearchPort {
   const queue = [...resultSets];
-  const calls: Array<{ query: string; opts?: { maxResults?: number } }> = [];
+  const calls: Array<{ query: string; opts?: SearchOptions }> = [];
   return {
     calls,
     async search(query, opts) {

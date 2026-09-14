@@ -45,6 +45,23 @@ export const env = {
    * TTFT p95, whereas honouring 30 s per turn produced a 66 s answer and a failed Gate 2 in the
    * deployed run of 2026-09-14.
    */
+  /**
+   * What makes the deep gear deeper PER SEARCH, not just wider. Quick keeps the provider's
+   * cheap defaults (5 results, 'basic'); deep asks for more results and Tavily's own deeper
+   * crawl. Added after the full bench of 2026-09-14 measured a deep answer at 1.69x the
+   * sources of the same query run quick (cap: 2x) — deep had been doing all its extra work
+   * through fan-out alone.
+   *
+   * Breadth but NOT Tavily's 'advanced' crawl by default, and the reason is cost honesty
+   * rather than latency: `max_results` does not change what a search costs (still one credit),
+   * while 'advanced' costs two — and `benchmark/sla.json`'s cost_model, which we may not edit,
+   * prices one credit per search. Taking the deeper crawl would make every declared deep cost
+   * quietly under-report the real spend. The knob stays available for a deploy that declares
+   * its own rates.
+   */
+  deepSearchMaxResults: num(process.env.DEEP_SEARCH_MAX_RESULTS, 10),
+  deepSearchDepth: (process.env.DEEP_SEARCH_DEPTH ?? 'basic') as 'basic' | 'advanced',
+
   llmMaxAttempts: num(process.env.LLM_MAX_ATTEMPTS, 3),
   llmRetryMaxWaitMs: num(process.env.LLM_RETRY_MAX_WAIT_MS, 4000),
 

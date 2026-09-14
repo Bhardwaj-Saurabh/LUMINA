@@ -6,7 +6,7 @@
  */
 import { z } from 'zod';
 import type { VettedUrl } from '../../guards/ssrf.js';
-import type { FetchPagePort, SearchPort } from '../../providers/search/port.js';
+import type { FetchPagePort, SearchOptions, SearchPort } from '../../providers/search/port.js';
 import type { SourceSink } from '../sourceCollector.js';
 import type { ToolDef } from '../registry.js';
 
@@ -23,6 +23,12 @@ export function makeWebSearchTool(deps: {
    * round trip plus the fetch — to read text Tavily had already returned (~1300 chars).
    */
   modelContentChars?: number;
+  /**
+   * How WIDE each search goes. Omitted ⇒ the provider's quick defaults. The deep gear passes
+   * a broader shape so that "deeper" means deeper retrieval per question, not just more
+   * questions — see providers/search/port.ts.
+   */
+  searchOptions?: SearchOptions;
 }): ToolDef {
   const modelContentChars = deps.modelContentChars ?? MODEL_CONTENT_CHARS;
   const schema = z.object({
@@ -43,7 +49,7 @@ export function makeWebSearchTool(deps: {
       required: ['query', 'reason']
     },
     async execute(input: z.infer<typeof schema>) {
-      const results = await deps.search.search(input.query);
+      const results = await deps.search.search(input.query, deps.searchOptions);
       return {
         results: results.map((r) => {
           const source = deps.collector.register({

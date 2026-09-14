@@ -129,7 +129,21 @@ export function makeRunAsk(deps: RunAskDeps) {
       const tools: ToolDef[] = [];
       if (body.mode !== 'docs') {
         tools.push(
-          makeWebSearchTool({ search: cachedSearch, collector: sink, modelContentChars: env.searchResultModelChars })
+          makeWebSearchTool({
+            search: cachedSearch,
+            collector: sink,
+            modelContentChars: env.searchResultModelChars,
+            // Structural, like the tool list itself: the gear decides how wide each search
+            // goes, not the prompt. Quick keeps the provider's cheap defaults.
+            ...(deep
+              ? {
+                  searchOptions: {
+                    maxResults: env.deepSearchMaxResults,
+                    depth: env.deepSearchDepth
+                  }
+                }
+              : {})
+          })
         );
         tools.push(
           makeFetchPageTool({

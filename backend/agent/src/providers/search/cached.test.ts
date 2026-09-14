@@ -112,6 +112,70 @@ describe('searchCacheKey derivation', () => {
   it('is a 64-character lowercase hex digest', () => {
     expect(searchCacheKey('  What IS   Tavily? ', 'tavily')).toMatch(/^[0-9a-f]{64}$/);
   });
+
+  /**
+   * Once the deep gear asks Tavily for a different breadth/depth, the SAME query returns a
+   * different result set. Keying only on (query, provider) would let a quick 5-result row be
+   * served to a deep search — deep would silently get quick's retrieval — and vice versa.
+   */
+  it('keys the same query separately when the gear asks for a different search shape', () => {
+    const quick = searchCacheKey('what is tavily?', 'tavily');
+    const deep = searchCacheKey('what is tavily?', 'tavily', { maxResults: 10, depth: 'advanced' });
+
+    expect(deep).not.toBe(quick);
+    expect(deep).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('leaves the quick-gear key byte-identical to the historical one, so cached rows survive', () => {
+    // Explicitly passing the quick defaults must not invent a new cache namespace.
+    expect(searchCacheKey('what is tavily?', 'tavily', { maxResults: 5, depth: 'basic' })).toBe(
+      searchCacheKey('what is tavily?', 'tavily')
+    );
+  });
+});
+
+describe('makeCachedSearch — the search shape travels with the query', () => {
+  it('does not serve a quick-gear cache entry to a deep-gear search', async () => {
+    const store = recordingStore();
+    const inner = recordingSearch(results('https://a.example', 'https://b.example'));
+    const cached = makeCachedSearch({
+      inner,
+      store,
+      lru: createSearchLru(),
+      provider: 'tavily',
+      ttlSeconds: TTL_SECONDS,
+      now: () => NOW
+    });
+
+    await cached.search('what is tavily?');
+    await cached.search('what is tavily?', { maxResults: 10, depth: 'advanced' });
+
+    // Two distinct shapes ⇒ two real searches, not one cache hit.
+    expect(inner.calls).toHaveLength(2);
+    expect(cached.stats().hits).toBe(0);
+  });
+
+  it('passes the requested shape through to the provider', async () => {
+    const seen: unknown[] = [];
+    const inner = {
+      async search(_q: string, opts?: unknown) {
+        seen.push(opts);
+        return results('https://a.example');
+      }
+    };
+    const cached = makeCachedSearch({
+      inner,
+      store: recordingStore(),
+      lru: createSearchLru(),
+      provider: 'tavily',
+      ttlSeconds: TTL_SECONDS,
+      now: () => NOW
+    });
+
+    await cached.search('deep question', { maxResults: 10, depth: 'advanced' });
+
+    expect(seen).toEqual([{ maxResults: 10, depth: 'advanced' }]);
+  });
 });
 
 describe('cached search — L1 (in-process LRU)', () => {

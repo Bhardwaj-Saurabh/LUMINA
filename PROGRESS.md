@@ -302,5 +302,96 @@ Trade-off, recorded as a prediction to be checked, not a result: a throttled ans
 arrive ~4 s late instead of 66 s — one sample near the TTFT p95 instead of a blown gate — and if
 every attempt is throttled the answer fails loudly instead of arriving a minute later. Note that
 4000 ms is itself over the 2500 ms TTFT target by construction: a retried turn is a slow turn,
-the point is only that it is now a *bounded* one. **Gate 2 has not been re-run at the time of
-writing; the next entry carries the measured number.**
+the point is only that it is now a *bounded* one.
+
+**Deployed eval run 2 (10:20Z, revision `lumina-agent-00002-rul`) — ttft p95 66259 → 3763 ms.**
+The prediction held. Gate 2 still FAILS (target 2500) but for a different and much smaller
+reason: **no retry fired at all** this run — `llm retry` / `embeddings retry` appear nowhere in
+the logs, so the provider was healthy and this is the un-throttled floor. Eight of the nine
+answers landed 1312–2414 ms; a single docs answer at 3683 ms set the p95, and with nine samples
+p95 *is* the max. Its timings show no pathology to fix: `turn1Ms 2810` for a 559-token call,
+`toolsMs 189`, final-turn first delta 684. Just one slow completion. Everything else green
+(grounding 1.0, 20/20 verifiable citations, error rate 0, recall@5 3/3, $0.0028/quick).
+
+CI/CD also went green end to end for the first time on this push: verify → agent candidate at
+no traffic → IAM-authenticated smoke → promote → gateway → public smoke. The previous deploy
+(189f964) had failed at `verify` on the `runs/` ENOENT that `fc17fdd` fixes, which is why the
+10:02Z eval ran against the older revision.
+
+**Why the last ~1.3 s is provider-bound, measured rather than asserted.** Two experiments, both
+of which said "do not build the thing you were about to build":
+
+1. *Tail shape, over all 803 recorded answers* — turn 1 p50 911 / p90 1648 / p95 2284 / p99
+   5594; final-turn first delta p50 766 / p90 1433 / p95 1906. TTFT is the sum of two such
+   draws (plus tool time), which puts its p95 near 3.3–3.8 s structurally. Hedging turn 1 (fire
+   a duplicate after H ms, keep the first to answer) is the textbook fix for a *rare* tail — but
+   this body is merely WIDE, not spiky: H=1200 ms would fire on **26.3 %** of all calls to move
+   turn-1 p95 by 173 ms, and H=800 ms on 68.4 %. Rejected on its own numbers, unbuilt.
+2. *Is another deployment faster?* (10 interleaved rounds per shape, so a slow minute hits both
+   equally.) gpt-5.4-mini decision p50 1361 / answer-first-delta p50 893 → modelled TTFT p50
+   2254 + tool time. gpt-5.4 "large" is worse on both: 2063 / 1605 → 3668. gpt-5.4-nano was
+   already measured 2.7× slower. Mini stays; there is no faster path on this account.
+
+The honest conclusion: a **two-turn agent loop on this Azure deployment cannot reliably hold
+ttft p95 ≤ 2500 ms**. The floor is two sequential completions (~1.9 s p50, and a p95 set by
+provider variance we do not control). Closing the remaining gap would mean removing a round trip
+from the critical path — i.e. hardcoding retrieve-then-generate instead of letting the agent
+decide — which SPEC forbids and which is the opposite of what this assignment grades. Recorded
+as a measured constraint; the threshold is not touched and the gate is reported as failed.
+
+### M9 — full bench against the deployment, run 1 (10:26Z) — 14/16 caps
+
+First full bench ever run against the deployed stack. **Failed on two caps**, everything else
+green: recall@5 30/30, cache hit 97.5 %, grounding 0.981 (211/215 verifiable, 0 dangling), error
+rate 0, search during ingest 0.529× idle, all six deep caps (5–6 sub-questions, plan p95 2194 ms,
+deep answer p95 20.3 s, 4.6× the sources of the same query run quick, $0.0111/deep), quick cost
+$0.0034.
+
+- `ttft p95 2659ms` (≤ 2500). The trend across fixes: 6481 → 3780 → 2880 → **2659**. The last
+  ~160 ms is the provider variance analysed above, not a code path.
+- `202 accept p95 943ms` (≤ 300) — **a regression that is not ours.** Cloud Run's own request
+  logs for all five `POST …/documents` in that window: agent latency **66–74 ms**, gateway
+  **87–93 ms**. The service answered every upload roughly 4× inside budget; the 943 ms was
+  measured client-side on the laptop driving the bench (the same four files accepted in
+  107–152 ms on the smoke run 30 minutes earlier). Checked before concluding: container CPU
+  utilisation over the whole ingest window was **1.4–7.8 %**, so the co-located worker was not
+  starving the request path — the hypothesis I started with, and the metric refuted it.
+
+Both remaining failures are therefore dominated by variance outside the service (provider tail,
+client network). Re-running once on that evidence — not to fish for a better draw, and this run
+stands recorded either way.
+
+### M9 — full bench run 2 (11:12Z) — 14/16 caps, and a DIFFERENT pair
+
+| cap | run 1 | run 2 |
+|---|---|---|
+| `ttft p95` | 2659 ✗ | 2686 ✗ |
+| `202 accept p95` | 943 ✗ | **130 ✓** |
+| `deep/quick source ratio (min)` | 4.6× ✓ | **1.69× ✗** |
+
+Two things settled. The 202 cap came back at 107–114 ms on the same four files, confirming that
+run 1's 943 ms was the measuring client, not the service. And ttft landing at 2659 then 2686 —
+27 ms apart — confirms the floor is structural rather than an unlucky draw, so I stopped
+re-running for it.
+
+**The deep-ratio miss was a real design gap, and the bench was right to catch it.** Both gears
+called Tavily with the identical hardcoded `max_results: 5, search_depth: 'basic'` — the
+adapter had always ignored the `opts.maxResults` its own `SearchPort` declared. So deep was only
+ever *wider* than quick (more sub-questions), never *deeper* per question, and the ratio rested
+entirely on fan-out: fine when the quick baseline happened to retrieve little (4.6×), thin when
+quick was thorough (a 13-source quick run against a 22-source deep one → 1.69×).
+
+Fixed by honouring the seam: `SearchOptions { maxResults, depth }` threaded port → Tavily
+adapter → `web_search` tool, chosen by gear in `runAsk` — structural, like the tool list itself,
+never a prompt instruction. Deep now asks for 10 results per sub-question, quick keeps the
+provider's 5. The search cache keys on the SHAPE as well as the query (`shapeOf`), or a quick
+5-result row would be served to a deep search and deep would silently inherit quick's
+retrieval; the quick defaults contribute an empty suffix, so rows written before this change
+stay valid. The adapter also takes an injected `fetch` now, which is what let its request shape
+be tested at all (3 new tests; 365 total).
+
+Deliberately NOT taken: Tavily's `search_depth: 'advanced'`. It would deepen the crawl, but it
+costs two credits where `max_results` costs none extra — and `benchmark/sla.json`'s cost_model,
+a file we may not edit, prices one credit per search. Using it would make every declared deep
+cost under-report the real spend. Breadth was the half that was free and honest; the knob
+(`DEEP_SEARCH_DEPTH`) stays for a deploy that declares its own rates.
