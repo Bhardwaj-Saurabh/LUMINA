@@ -1,65 +1,162 @@
-# DESIGN.md — LUMINA
+# DESIGN.md --- LUMINA
 
 ## Components
 
-| # | Component | Runs where | What it is |
-|---|-----------|-----------|------------|
-| 1 | **React UI** (provided, unmodified) | Vercel — the submitted URL | Query box, streaming answer, citations, memory panel, Spaces, `/evals` |
-| 2 | **Gateway** (Express) | Cloud Run, public | The only thing the browser talks to: validate, rate-limit, log, proxy; also serves `web/dist` for same-origin local use |
-| 3 | **Agent service** (Express) | Cloud Run, **not** publicly reachable (IAM-gated) | The agent loop, tools, memory, RAG, deep search — and every provider key |
-| 4 | **Jobs worker** | Child process inside the agent container | Claims `index_document` work from the `jobs` collection; own lifecycle, lease, and failure story |
-| 5 | **MongoDB Atlas** (one cluster) | Atlas M0, GCP europe-west2 | Threads, messages, memories + chunks (vector indexes), `searchCache` (TTL), `jobs`, `requests`/`runs`, GridFS uploads |
+  ---------------------------------------------------------------------------
+  \#                Component         Runs where        What it is
+  ----------------- ----------------- ----------------- ---------------------
+  1                 **React UI**      Vercel --- the    Query box, streaming
+                    (provided,        submitted URL     answers, citations,
+                    unmodified)                         memory, Spaces, and
+                                                        `/evals`
 
-Two non-services carry state or make decisions, so they count as components:
+  2                 **Gateway**       Cloud Run, public The only
+                    (Express)                           browser-facing
+                                                        service: validation,
+                                                        rate limiting,
+                                                        logging, proxying,
+                                                        and local `web/dist`
+                                                        serving
 
-- **Run log** — one record per answer. The quality gates read it, so it is a contract surface, not telemetry.
-- **Search cache** — a two-tier decorator (in-process LRU → `searchCache` collection → provider) that decides whether a search costs money.
+  3                 **Agent service** Cloud Run,        Agent loop, tools,
+                    (Express)         **IAM-gated**     memory, RAG, deep
+                                                        search, spend
+                                                        controls, and all
+                                                        provider credentials
+
+  4                 **Jobs worker**   Child process     Claims
+                                      inside the agent  document-indexing
+                                      container         jobs, manages
+                                                        leases/checkpoints,
+                                                        and performs parsing,
+                                                        chunking, and
+                                                        embedding
+
+  5                 **MongoDB Atlas** Atlas M0, GCP     Threads, messages,
+                                      `europe-west2`    memories, Spaces,
+                                                        documents/chunks,
+                                                        search cache, jobs,
+                                                        run/accounting data,
+                                                        and GridFS uploads
+  ---------------------------------------------------------------------------
+
+Two supporting components are also important because they carry state or
+influence execution:
+
+-   **Run log** --- one durable record per answer; used for
+    observability and evaluation evidence.
+-   **Search cache** --- two-tier cache (`LRU → searchCache → provider`)
+    that reduces repeated provider calls and cost.
 
 ## Responsibilities
 
-The interesting part is what each component is the **only** one allowed to do — and what it is forbidden from doing:
+The key design principle is clear ownership: each component has
+responsibilities it owns and boundaries it must not cross.
 
-- **Gateway** — the only component that faces a browser; the only one that says `401`, `400`, or rate-limit `429`. Forbidden: holding a provider key, parsing an SSE frame, making any AI decision. It forwards bytes.
-- **Agent service** — the only component that calls Anthropic / Tavily / OpenAI. The only one that can **mint a citation**: sources are created exclusively from material retrieved in that same request, by construction. The only place a **spend decision** happens: per-request budgets, the deep-search daily cap (`429 {error, resetsAt}`), and the kill switch — all behind IAM, so none can be bypassed by calling the AI backend directly.
-- **Worker** — the only component allowed to parse, chunk, embed, or flip a document to `indexed`. The request path may only accept an upload (`202` in < 300 ms) and enqueue.
-- **The loop** — the only place `terminated` is set (`done | cap | error`), explicitly at every exit.
-- **Mongo** — owns durability. Nothing is reported as done that it has not acknowledged.
+-   **Gateway** --- the only component that faces the browser and
+    enforces edge concerns such as `401`, `400`, and rate-limit `429`.
+    It must not hold provider keys, make AI decisions, or interpret SSE
+    frames; it forwards the stream unchanged.
+-   **Agent service** --- the only component that calls external
+    AI/search providers. It owns the agent loop, citations, budgets,
+    deep-search admission, and kill switches. Citations can only be
+    created from evidence retrieved during the current request.
+-   **Worker** --- the only component allowed to parse, chunk, embed,
+    and mark a document as `indexed`. The request path accepts the
+    upload, persists the job, and returns `202`.
+-   **Agent loop** --- the only place that determines terminal execution
+    state: `done | cap | error`.
+-   **MongoDB** --- owns durable application state and accounting. A run
+    is not reported as successfully completed until the required
+    persistence has been acknowledged.
 
 ## Communication
 
-| Link | Mechanism | Why this way · what happens when the far side is down |
-|------|-----------|------------------------------------------------------|
-| Browser → gateway | HTTPS + `x-user-id` / `x-request-id`; the ask route is SSE (`plan? → trace → sources → token → done`) | The UI needs trace/source events before tokens; SSE gives ordered frames over one request |
-| Gateway → agent | Same HTTP contract + a Google-signed IAM ID token; SSE passed through **chunk-by-chunk, never parsed** | Buffering silently destroys time-to-first-token. Agent down → `502` before SSE headers commit; failure mid-stream → terminal SSE `error` frame (an HTTP status cannot change once streaming, so the error frame is the honest channel) |
-| Agent → worker | Not HTTP: the `jobs` collection, claimed with an atomic `findOneAndUpdate` lease + heartbeats | Worker dies mid-job → lease goes stale → a sweeper returns the row to `pending`; resume from stage checkpoints, never re-run finished work |
-| Client disconnect | Abort propagated upstream | All in-flight work is cancelled and the run is recorded as interrupted — never as a success |
+  --------------------------------------------------------------------------------------------
+  Link                    Mechanism                                    Why this way
+  ----------------------- -------------------------------------------- -----------------------
+  Browser → gateway       HTTPS + `x-user-id` / `x-request-id`; ask    Keeps the browser on
+                          uses SSE                                     one public endpoint
+                          (`plan? → trace → sources → token → done`)   while preserving
+                                                                       ordered streaming
+                                                                       events and citations
+                                                                       before answer tokens
+
+  Gateway → agent         Same HTTP contract + Google-signed Cloud Run Keeps the agent private
+                          IAM ID token; SSE passed through             and prevents buffering
+                          chunk-by-chunk                               from adding latency or
+                                                                       breaking TTFT. Upstream
+                                                                       failure becomes `502`
+                                                                       before headers; after
+                                                                       streaming starts,
+                                                                       failure is represented
+                                                                       by the SSE `error`
+                                                                       event
+
+  Agent → worker          MongoDB `jobs` collection with atomic claim, Avoids a separate
+                          lease, heartbeat, and checkpoints            queue/service for the
+                                                                       course design. A
+                                                                       crashed worker can be
+                                                                       reclaimed and resumed
+                                                                       safely
+
+  Client disconnect →     Abort signal propagated upstream             Cancels in-flight work
+  backend                                                              and records the
+                                                                       interrupted execution
+                                                                       rather than treating it
+                                                                       as success
+  --------------------------------------------------------------------------------------------
 
 ## State
 
-**Authoritative (in Mongo — a user would miss it):**
+**Authoritative state --- MongoDB:**
 
-- Threads and messages; long-term **memories** — visible and deletable at `/memory`, and nothing is remembered that the endpoint does not show
-- Spaces, documents, and their chunks with page/line locators
-- The per-user deep-search admission ledger
-- `requests` / `runs` accounting — what `/stats` and the graders read
+-   Threads and messages
+-   Long-term memories, visible and deletable through `/memory`
+-   Spaces, documents, and chunks with page/line locators
+-   Per-user deep-search admission ledger
+-   `requests` / `runs` accounting used by `/stats` and evaluation
 
-**Disposable caches (delete without losing anything):**
+**Disposable state:**
 
-- The in-process search LRU — dies with the instance, costs nothing
-- The `searchCache` collection — TTL-expired; deleting it only makes the next search cost ~$0.008
+-   In-process search LRU --- lost when the instance is replaced
+-   `searchCache` --- TTL-based; deleting it affects performance/cost,
+    not correctness
 
-**Placement quirk:** run logs are local files in development but live in the `runs` collection when deployed — Cloud Run's filesystem is in-memory and dies with the instance.
+**Deployment note:** run logs are local files during development but are
+persisted in MongoDB when deployed because the Cloud Run filesystem is
+ephemeral.
 
-**The consistency story I had to design around:** Atlas Search indexes are eventually consistent, so a chunk that has been written is **not yet searchable**. A document only reaches `indexed` after a read-your-write probe gets one of its own chunks back from the vector index. "Upserted" is not "searchable", and the status field never claims otherwise.
+**Consistency:** Atlas Search is eventually consistent. A written chunk
+is therefore not considered indexed until a read-your-write probe
+confirms that it is searchable. The system treats **"written" and
+"searchable" as separate states**.
 
 ## Trade-offs
 
-Four decisions a reasonable engineer could have made differently:
+Four important choices were made deliberately:
 
-1. **Atlas Vector Search instead of a dedicated vector store.** A citation is one document — the embedding lives next to the chunk text and its page locator, and `spaceId` is a plain filter inside `$vectorSearch`. What I gave up: the M0 tier's three-search-index limit, and eventual consistency I have to probe around.
+1.  **MongoDB Atlas Vector Search instead of a dedicated vector
+    database.**\
+    Keeping embeddings, chunk text, locators, and ownership metadata
+    together simplifies the design and citation path. The trade-off is
+    Atlas tier/index limits and eventual consistency, which requires the
+    read-your-write check.
 
-2. **A hand-rolled agent loop over the Anthropic SDK instead of a framework.** The contract requires control of every turn — trace events per step, sources before tokens, explicit termination, budget checkpoints between calls — which frameworks own and hide. What I gave up: prebuilt orchestration; I accepted more code that is mine to maintain in exchange for seams the graders can actually measure.
+2.  **A custom agent loop instead of an agent framework.**\
+    LUMINA needs explicit control over tool calls, trace events, source
+    ordering, termination states, and budget checkpoints. A custom loop
+    adds implementation effort, but makes those behaviours predictable
+    and testable.
 
-3. **Worker co-located in the agent container instead of a separate service.** One always-on Cloud Run instance instead of two — instance-based billing is required anyway, because request-billed Cloud Run throttles CPU and silently freezes a polling loop. What I gave up: blast-radius isolation between ingestion and answering. At real scale I would split them.
+3.  **Worker co-located with the agent instead of a separate service.**\
+    This keeps the course deployment small and avoids another service to
+    operate. The trade-off is shared CPU/memory and a larger blast
+    radius. At production scale, the worker should be separated.
 
-4. **RRF-only hybrid retrieval, no reranker — the one I am least sure about.** Skipping rerank keeps a provider call off the retrieval path, and the spec allows it with a documented reason. If recall@5 misses 0.70 on the gold set, the plan is: diagnose chunk boundaries and candidate coverage first, and only then add a bounded reranker inside the latency budget. I may end up eating that cost anyway.
+4.  **RRF-only hybrid retrieval initially, without a reranker.**\
+    RRF keeps the retrieval path simple and avoids another provider call
+    on the quick path. The trade-off is potentially lower ranking
+    quality. If the measured `Recall@5` target is missed, first tune
+    chunking and candidate coverage; add a bounded reranker only if the
+    evidence justifies its latency and cost.
