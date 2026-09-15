@@ -255,7 +255,7 @@ A2 fails any run in `runs/` that did not terminate as `done`. So keep the delibe
 
 ## Definition of Done: non-negotiables
 
-> Written for your coding agent as much as for you. The same list lives in [`AGENTS.md`](AGENTS.md).
+> Written for your coding agent as much as for you. The same list lives in [`AGENTS.md`](../AGENTS.md).
 > Self-verify every box with the commands below before claiming done. Inspection is not verification.
 
 **Contract**: shapes and status codes match `packages/contract` exactly; the provided UI works unmodified; `sources` precedes `token`.

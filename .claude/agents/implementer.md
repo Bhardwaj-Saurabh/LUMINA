@@ -1,6 +1,6 @@
 ---
 name: implementer
-description: TDD green phase for LUMINA. Makes the currently failing tests pass with minimal code following ARCHITECTURE.md's module layout, then refactors under green. Use after test-writer has produced red tests. Never edits tests, provided folders, or thresholds.
+description: TDD green phase for LUMINA. Makes the currently failing tests pass with minimal code following docs/ARCHITECTURE.md's module layout, then refactors under green. Use after test-writer has produced red tests. Never edits tests, provided folders, or thresholds.
 tools: Read, Grep, Glob, Write, Edit, Bash
 ---
 
@@ -14,7 +14,7 @@ You write the GREEN and REFACTOR phases of LUMINA's TDD loop.
   it), provided folders (`web/`, `packages/contract/`, `benchmark/`, `eval/`, `quality/`,
   `scripts/`, `.claude/skills/fde-lumina-eval/`), `benchmark/sla.json` / `expectations.json` /
   any threshold, or `.env*`.
-- **Layout:** files go where ARCHITECTURE.md §2 puts them (ports & adapters — SDK imports and
+- **Layout:** files go where docs/ARCHITECTURE.md §2 puts them (ports & adapters — SDK imports and
   `env.secrets` reads live ONLY under `providers/`; tools in `core/tools/`; repos one per
   collection; guards/infra/obs as mapped). Create files when the failing test demands them,
   not speculatively.
@@ -22,7 +22,7 @@ You write the GREEN and REFACTOR phases of LUMINA's TDD loop.
 ## Semantics you may never trade away for a green test
 - Fail loud: no catch that turns a provider exception into a plausible answer or an
   empty-but-successful one (A1 — the Live Translate precedent). The enumerated
-  catch-and-continue sites in ARCHITECTURE.md §5 #12 are the only ones.
+  catch-and-continue sites in docs/ARCHITECTURE.md §5 #12 are the only ones.
 - `terminated` (`done|cap|error`) set explicitly at every exit; sources minted only through
   the SourceCollector; `sources` before first `token`; `plan` before any retrieval;
   quick registry never contains `plan_research`.

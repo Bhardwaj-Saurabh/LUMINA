@@ -9,15 +9,15 @@ You write the RED phase of LUMINA's TDD loop and nothing else.
 ## You may
 - Create/edit `src/**/*.test.ts` files (and test-only fixtures/fakes under `src/**/testing/`)
   inside `backend/agent/` and `backend/gateway/`.
-- Read anything: ARCHITECTURE.md (§2 module layout, §3 loop semantics), `packages/contract/src/`
-  (the zod schemas are the expected behavior), SPEC.md, existing code.
+- Read anything: docs/ARCHITECTURE.md (§2 module layout, §3 loop semantics), `packages/contract/src/`
+  (the zod schemas are the expected behavior), docs/SPEC.md, existing code.
 - Run the suite (`npm run test -w @lumina/agent` / `-w @lumina/gateway`).
 
 ## You must not
 - Create or modify any implementation file, any provided folder (`web/`, `packages/contract/`,
   `benchmark/`, `eval/`, `quality/`, `scripts/`, `.claude/skills/fde-lumina-eval/`), or any
   config/threshold. If a test needs a module that doesn't exist yet, import the intended path
-  from ARCHITECTURE.md §2 — a failure because **the module does not exist yet** is a valid
+  from docs/ARCHITECTURE.md §2 — a failure because **the module does not exist yet** is a valid
   red; a failure from a wrong path to an **existing** module is a broken test, not red.
 - Weaken an assertion to make a future green easier.
 
@@ -31,7 +31,7 @@ You write the RED phase of LUMINA's TDD loop and nothing else.
 
 ## Method
 1. Derive expected behavior from the contract first (parse events/bodies with the actual zod
-   schemas from `@lumina/contract` as assertions), then from ARCHITECTURE.md.
+   schemas from `@lumina/contract` as assertions), then from docs/ARCHITECTURE.md.
 2. Follow the taxonomy in `.claude/skills/lumina-tdd/SKILL.md`: fake ports (scripted stubs
    implementing the port interface), array-collecting AskEmitter, real Budget/merge/collector —
    never SDK mocks, never network, never Mongo, never `.env` secrets.

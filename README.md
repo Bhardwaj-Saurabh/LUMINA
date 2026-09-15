@@ -1,97 +1,174 @@
-# Assignment 1: LUMINA
+<div align="center">
 
-> Build a Perplexity-style AI search engine. Ask a question, get a streamed answer with
-> citations you can click, built from a live web search and from your own documents. Ask a
-> harder one and it plans sub-questions, researches each, and merges the citations.
+![LUMINA — AI-powered research assistant](images/lumina.png)
 
-You are given a **working React UI** and a **typed API contract**. You build the two backend
-services they talk to. When your backend works, the UI lights up. That's the whole game.
+# LUMINA
+
+**A Perplexity-style AI search engine. Streamed answers, citations that resolve, your own documents, and a deep-research mode that plans before it searches.**
+
+[**Live app**](https://lumina-theta-woad.vercel.app) · [**Evidence page**](https://lumina-theta-woad.vercel.app/evals) · [**API health**](https://lumina-gateway-iwc6fhv5oa-nw.a.run.app/health)
+
+Built by **[Saurabh Bhardwaj](https://www.linkedin.com/in/bhardwajsaurabh/)** — hand-rolled agent loop, no framework.
+
+</div>
 
 ---
 
-## Start here
+## What it does
+
+Ask a question. Sources stream in first, then the answer, with every `[n]` pointing at something
+retrieved during *that* request. Upload a PDF and ask about it. Tell it you prefer TypeScript and
+it remembers next session — and shows you the memory so you can delete it.
+
+Ask a harder question and switch to **deep mode**: it plans 3–6 sub-questions, researches them in
+parallel, deduplicates and renumbers every citation into one list, then writes a synthesis.
+
+## Measured, on the deployed app
+
+Numbers from the deployed full benchmark of 2026-09-14. Not localhost, not cherry-picked — the
+failure is in the table too.
+
+| | Result |
+|---|---|
+| Recall@5 over the gold question set | **1.000** |
+| Citation grounding | **0.97**, with **zero** dangling citations |
+| Error rate | **0** |
+| Search cache hit rate | **97.5%** |
+| Cost per quick answer | **$0.0035** |
+| Cost per deep answer | **$0.011** |
+| Deep mode's source count vs the same query run quick | **5.1×** |
+| Time to first token (p95) | **2.7–4.7 s across three runs — over target. Not fixed.** |
+| Tests | **422** (365 agent, 57 gateway) |
+| Logged runs | **1,243** |
+
+The latency miss is [diagnosed in PROGRESS.md](PROGRESS.md) with the three candidate fixes I
+rejected on their own numbers. I'd rather show a measured failure than an unmeasured claim.
+
+---
+
+## For engineering leaders
+
+If you're hiring for an AI/FDE role, this repo is here so you can judge the engineering rather
+than the demo. Four things I'd point at:
+
+**1. Structural guarantees, not prompt instructions.** "Only deep mode may plan" is enforced by
+filtering the tool registry before the model call, and again at dispatch — a prompt asking nicely
+is not a gate. When the model answered from its own weights and returned zero sources, the fix
+wasn't a sterner prompt: it was `tool_choice: 'required'` until a retrieval tool has actually run,
+narrowing the advertised set if it dodges. → [`core/registry.ts`](backend/agent/src/core/registry.ts),
+[`core/loop.ts`](backend/agent/src/core/loop.ts)
+
+**2. Fail loud, and never plausibly.** A provider exception is a `502` with the real reason. A run
+that hits its cap reports `terminated: "cap"`, never `"done"`. There is no `catch` that returns a
+believable answer — that's the failure mode the whole project is shaped against.
+→ [`providers/llm/retry.ts`](backend/agent/src/providers/llm/retry.ts)
+
+**3. Measurement before optimisation, including when it kills the idea.** I nearly built request
+hedging to cut the latency tail. Across 803 recorded answers the data said it would fire on 26% of
+calls to save 173 ms, so it was never written. Same for a smaller model (slower here), a larger one
+(slower), and more CPU (utilisation was 1.4–7.8%).
+
+**4. Honest evidence.** Every answer writes a run log. `/evals` serves a report an operator
+published, never a live computation, with a strong ETag and `X-Published-At`. Deliberately-failed
+runs live in `runs/failing/` so they can't be mistaken for passes.
+
+### Three bugs worth the interview
+
+| What happened | Why it mattered |
+|---|---|
+| A deployed answer took **66 seconds**. The model wasn't slow — the OpenAI SDK was honouring Azure's `Retry-After: 30` *inside* the call, un-abortably, so neither the request budget nor the tool deadline could see it. Per-turn timings caught it: a turn doing ~1 s of work took 32. | Replaced with a retry that is bounded, cancellable and logged. **66 s → 3.7 s.** A slow turn must always be explainable from the log. |
+| Deep mode was only *wider* than quick, never *deeper*. Both gears called the search provider with an identical hardcoded 5 results — the adapter had been ignoring the options its own port declared since day one. | Threaded the search shape through port → adapter → tool, chosen by gear. Deep/quick source ratio **1.69× → 5.11×**. The benchmark caught a design gap, not a typo. |
+| I blamed my laptop's network for the remaining latency and wrote it down as fact. It was a methodology error: I'd compared p95s of two different answer pools. | Measured properly by pairing each request with its own recorded TTFT: transport is **107 ms** from a laptop vs **68 ms** from inside the region. I was wrong, and the correction is in the commit history rather than quietly edited out. |
+
+---
+
+## For people who want to build this
+
+Start here, in this order:
+
+1. **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — the design authority: module layout for both
+   services, the guardrail catalogue, sequence diagrams for every flow, and the deployment plan.
+   If you read one file, read this.
+2. **[DESIGN.md](DESIGN.md)** — the five design questions answered plainly: components,
+   responsibilities, communication, state, trade-offs.
+3. **[docs/RUNBOOK.md](docs/RUNBOOK.md)** — how to run it, the gate commands, and the failures that
+   cost the most time.
+4. **[PROGRESS.md](PROGRESS.md)** — the build diary. Every milestone with the gate result that
+   closed it, in order, failures included. This is the file that shows *how* the thing was built.
+
+The five ideas that carried the most weight:
+
+- **The contract is executable.** Zod schemas in `packages/contract` define the SSE frames and
+  routes; both services import them, so a contract change is a compile error rather than a
+  production surprise.
+- **Sources strictly before tokens.** A `SourceCollector` mints every citation number, so a
+  dangling `[n]` is structurally impossible rather than merely unlikely.
+- **Hybrid retrieval.** Atlas `$vectorSearch` + BM25 `$search`, fused with Reciprocal Rank Fusion.
+  The `spaceId` filter lives *inside* `$vectorSearch` — a later `$match` silently leaks across
+  tenants.
+- **Async ingestion that tells the truth.** Upload returns `202` in under 300 ms; a worker parses,
+  chunks with page locators, embeds, then runs a **read-your-write probe** against the index before
+  it dares report `indexed`.
+- **Speculative retrieval.** The user's query starts searching *during* the model's first turn; the
+  model's own call joins the in-flight request. A prefetch can never mint a source, and a join is
+  honestly counted as a cache miss.
 
 ```bash
 npm install
-cp .env.example .env      # fill in MONGODB_URI and your provider keys
-npm run dev               # UI on :5173, gateway on :8787, agent on :8000
+npm run build -w @lumina/contract   # required first — the workspaces import its dist/
+npm run indexes                     # Atlas vector + BM25 + TTL indexes
+npm run dev                         # agent :8000 · gateway :8787 · UI :5173
 ```
 
-Open <http://localhost:5173> and click everything. Every panel says
-`501 not implemented yet`, which is correct: that message is your progress bar, and each
-route you finish lights one up.
+Full setup, the gate ladder and the gotchas: **[docs/RUNBOOK.md](docs/RUNBOOK.md)**.
 
-## Then read, in this order
+---
 
-| # | Read | Why |
-|---|---|---|
-| 1 | [`PRD.md`](PRD.md) | What the product is and the four rules that decide your grade. ~15 min. |
-| 2 | `packages/contract/src/` | The contract, as zod schemas rather than prose — the literal answer to "what do I return?". Start with `sse.ts`, then `http.ts`. Best half hour you can spend. |
-| 3 | [`DESIGN.template.md`](DESIGN.template.md) | Copy to `DESIGN.md` and answer the five questions **before you write code**. It is graded. |
-| 4 | `benchmark/sla.json`, `expectations.json`, `eval/rubric.json` | The targets, the budgets, the points. Declared before you run, on purpose. |
-| 5 | [`TECHNICAL.md`](TECHNICAL.md) | The build guide: architecture, commands, checklists, troubleshooting. |
+## Stack
 
-Your coding agent should read [`AGENTS.md`](AGENTS.md) and [`SPEC.md`](SPEC.md) instead —
-the first is the non-negotiables, the second is every requirement stated explicitly.
+**TypeScript** everywhere · **Express** × 2 (public gateway, IAM-gated agent) · **React** + Vite ·
+**MongoDB Atlas** (vector + BM25 + TTL in one cluster) · **Azure OpenAI** `gpt-5.4-mini` and
+`text-embedding-3-large` at 1536 dims · **Tavily** search · **Cloud Run** + **Artifact Registry** +
+**Secret Manager** + **Workload Identity Federation** · **Vercel** for the UI · **Vitest**
 
-## What you build
+Deployment shape: the agent is `--no-allow-unauthenticated` and only the gateway's service account
+holds `run.invoker`; the gateway proves who it is with an ID token minted by the metadata server.
+Provider keys live in Secret Manager, mounted into the agent alone — the gateway holds none.
 
-| | |
-|---|---|
-| ✅ **Provided** | The UI, the API contract, `501` skeletons for both services, the Atlas index script, the benchmark, the gold set and corpus, the grader, and the eval skill. |
-| 🔨 **Yours** | `backend/gateway/` — the edge: CORS, the `X-User-Id` check, request ids, logging, validation, rate limits, SSE pass-through. |
-| 🔨 **Yours** | `backend/agent/` — the work: the agent loop, its tools, memory, RAG, deep search, the jobs worker, run logs. Provider keys live only here. |
+## Repo map
 
-Do not edit `web/`, `packages/contract/`, `benchmark/`, `eval/`, `quality/` or `scripts/`.
-Those are the UI, the contract and the grader; editing them is a red line and it is checked.
-Read them, then build a backend that satisfies them.
-
-## The build, in one screen
-
-Build the agent service first — you can drive it entirely with `curl -N`, no browser needed.
-Then the gateway. Then load the UI and watch it light up.
-
-1. `/health`, then the **quick loop** with `web_search` + `fetch_page`, streaming
-   `trace → sources → token → done`. Sources before the first token.
-2. The **search cache**: in-process LRU over a TTL'd Mongo collection.
-3. **Threads and messages**, so a follow-up sees the conversation.
-4. **Memory**: `save_memory` / `recall_memory`, listed and deletable at `/memory`.
-5. The **run log** — one file per answer. Ten lines of adapter, and the gates read it.
-6. **Spaces and the jobs worker**: upload → `202` → parse → chunk → embed → probe → indexed.
-7. **Hybrid retrieval**: vector + text, fused, with page locators in the citations.
-8. **Deep search**: plan sub-questions, research each, merge into one citation numbering.
-9. The **gateway**, then the **deploy**.
-
-Each step is a section in [`TECHNICAL.md`](TECHNICAL.md) with the commands and the gotchas.
-
-## How you prove it
-
-```bash
-node benchmark/bench.mjs      # the SLA: latency, grounding, recall, cache, cost. Exits 0 or tells you why.
-node quality/check.mjs .      # the rules, over your run logs
-node eval/eval.mjs            # all six gates, in order, stopping at the first failure
+```
+backend/agent/       the AI: loop, tool registry, memory, RAG, deep search, jobs worker, ops CLIs
+backend/gateway/     the edge: auth, validation, rate limiting, SSE pass-through, IAM tokens
+packages/contract/   zod schemas — the executable contract, outranking all prose
+web/                 the React UI (provided by the course, unmodified)
+docs/                architecture, spec, runbook, and the original assignment brief
+benchmark/ eval/ quality/   the graders: SLA bench, gate ladder, run-log rules
 ```
 
-Correct but slow, expensive, or ungrounded fails. The targets are in
-`benchmark/sla.json`, declared before your first run — [`TECHNICAL.md`](TECHNICAL.md)
-explains what each one measures and how the grounding check works.
+## Honest status
 
-## How you submit
+Deployed and serving. **15 of 16 benchmark targets pass.** The one that doesn't is
+time-to-first-token p95, and closing it would mean removing a round trip from the critical path —
+i.e. hardcoding retrieve-then-generate instead of letting the agent decide, which is the opposite
+of the thing worth building. The analysis, the rejected fixes and the measurements are all in
+[PROGRESS.md](PROGRESS.md).
 
-**One URL**: your deployed app, with `/` working for a stranger and `/evals` rendering the
-evaluation your run produced. No repo, no zip, no code.
+---
 
-In Claude Code, run `/fde-lumina-eval --deploy-url https://<your-gateway>`. It runs the
-gates against the deployed app, walks you through your two trajectories, and writes the
-`report.json` the provided UI renders at `/evals`.
+<div align="center">
 
-Full flow, the deploy table, and the 60–90 second video checklist:
-[`TECHNICAL.md`](TECHNICAL.md#submit) · course-wide rules:
-[`SUBMISSION.md`](../../../SUBMISSION.md).
+### Building something in this space?
 
-## Stuck?
+I like problems where the answer has to be *provable* — grounded retrieval, agent loops you can
+defend turn by turn, and latency budgets someone actually measures.
 
-[`TECHNICAL.md`](TECHNICAL.md#troubleshooting) covers the failures that cost people the most
-time: tokens arriving all at once, a document that indexes but cannot be found, retrieval
-that leaks across Spaces, uploads that stall the answer stream, and a "deep" search that is
-only slower.
+**[Let's talk →](https://www.linkedin.com/in/bhardwajsaurabh/)**
+
+</div>
+
+---
+
+<sub>Built as the backend for an assignment from the FDE Agent Engineering Bootcamp. The React UI and
+the API contract are course material, unmodified — see [docs/ASSIGNMENT.md](docs/ASSIGNMENT.md). The
+backend, the architecture, the bugs and the lessons are mine.</sub>

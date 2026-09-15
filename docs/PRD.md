@@ -107,7 +107,7 @@ your call to make and your risk to carry.
 
 ## The five questions
 
-Before you open an editor, write `DESIGN.md` from [`DESIGN.template.md`](DESIGN.template.md):
+Before you open an editor, write `DESIGN.md` from [`DESIGN.template.md`](../DESIGN.template.md):
 
 1. **Components** — what are the pieces, and where does each run?
 2. **Responsibilities** — what is each piece the *only* one allowed to do?
@@ -155,5 +155,5 @@ evidence page are the submission. Course-wide rules are in
 | The exact wire format | `packages/contract/src/` — the schemas are the contract |
 | Commands, architecture, checklists, troubleshooting | [`TECHNICAL.md`](TECHNICAL.md) |
 | Every requirement, unabridged | [`SPEC.md`](SPEC.md) |
-| The rules your coding agent must not break | [`AGENTS.md`](AGENTS.md) |
+| The rules your coding agent must not break | [`AGENTS.md`](../AGENTS.md) |
 | What the numbers are | `benchmark/sla.json`, `expectations.json`, `eval/rubric.json` |

@@ -3,11 +3,11 @@
 You are helping a student complete **Assignment 1: LUMINA**. This file is the contract you
 must satisfy. Do not relax, reinterpret, or "improve" these requirements. Conform to them.
 
-Your reading order: **`SPEC.md`** is the exhaustive specification and the one written for you
+Your reading order: **`docs/SPEC.md`** is the exhaustive specification and the one written for you
 — every requirement, status code and failure mode, stated explicitly. `packages/contract/`
-is the same thing as executable schemas and outranks all prose. `TECHNICAL.md` is the build
+is the same thing as executable schemas and outranks all prose. `docs/TECHNICAL.md` is the build
 guide (commands, checklists, the self-verify block). `README.md` is the short front door and
-`PRD.md` the short human product doc; read those for intent, never for numbers.
+`docs/PRD.md` the short human product doc; read those for intent, never for numbers.
 
 Where a threshold is concerned, `benchmark/sla.json`, `expectations.json` and
 `eval/rubric.json` are the only authorities. If prose disagrees with them, the prose is

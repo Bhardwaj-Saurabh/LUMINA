@@ -3,9 +3,9 @@
 The project's own notes: how to run it, how it is deployed, and the things that cost time.
 
 `README.md` is the **course's assignment brief** and is left exactly as delivered. The design
-answers live in [`DESIGN.md`](DESIGN.md), the decided architecture in
+answers live in [`DESIGN.md`](../DESIGN.md), the decided architecture in
 [`ARCHITECTURE.md`](ARCHITECTURE.md), and the delivery record — every gate result, in order,
-including the failures — in [`PROGRESS.md`](PROGRESS.md).
+including the failures — in [`PROGRESS.md`](../PROGRESS.md).
 
 ## Live
 

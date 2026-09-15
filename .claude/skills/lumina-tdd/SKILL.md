@@ -17,7 +17,7 @@ TDD is how we arrive at code that passes them without thrashing.
    If delegating, the `test-writer` agent does this step and must report the failure
    message verbatim.
 2. **Green.** Write the minimal implementation that passes. No speculative structure — the
-   module layout comes from ARCHITECTURE.md §2, but files are created when a test demands
+   module layout comes from docs/ARCHITECTURE.md §2, but files are created when a test demands
    them, not scaffolded empty ("the module list is a responsibility map, not a requirement to
    scaffold every file first"). The `implementer` agent does this step and may not edit tests.
 3. **Refactor.** With green tests, clean up. Re-run tests + `npm run typecheck` + `npm run lint`.
